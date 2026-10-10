@@ -1,0 +1,35 @@
+PASS 05 mode= smoke Daily= 126 Tuning= 26 Frozen= 9 
+Protected input/output hashes unchanged. Output: results/smoke_p1p3_20261010_final/扩充_05.xlsx 
+R version 4.5.3 (2026-03-11 ucrt)
+Platform: x86_64-w64-mingw32/x64
+Running under: Windows 11 x64 (build 22631)
+
+Matrix products: default
+  LAPACK version 3.12.1
+
+locale:
+[1] LC_COLLATE=English_United States.utf8 
+[2] LC_CTYPE=English_United States.utf8   
+[3] LC_MONETARY=English_United States.utf8
+[4] LC_NUMERIC=C                          
+[5] LC_TIME=English_United States.utf8    
+
+time zone: Asia/Shanghai
+tzcode source: internal
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+[1] forecast_9.0.2 writexl_2.0.1  tidyr_1.3.2    dplyr_1.2.1    readxl_1.5.0  
+
+loaded via a namespace (and not attached):
+ [1] gtable_0.3.6       jsonlite_2.0.0     compiler_4.5.3     tidyselect_1.2.1  
+ [5] Rcpp_1.1.1         parallel_4.5.3     scales_1.4.0       lattice_0.22-9    
+ [9] ggplot2_4.0.2      R6_2.6.1           generics_0.1.4     tibble_3.3.1      
+[13] timeDate_4052.112  pillar_1.11.1      RColorBrewer_1.1-3 rlang_1.2.0       
+[17] urca_1.3-4         S7_0.2.1           cli_3.6.6          withr_3.0.2       
+[21] magrittr_2.0.5     digest_0.6.39      grid_4.5.3         lifecycle_1.0.5   
+[25] nlme_3.1-168       fracdiff_1.5-4     vctrs_0.7.3        glue_1.8.0        
+[29] farver_2.1.2       cellranger_1.1.0   zoo_1.8-15         colorspace_2.1-3  
+[33] purrr_1.2.2        tools_4.5.3        pkgconfig_2.0.3   

@@ -1,0 +1,130 @@
+PASS 05 schema/dates/14-days/all-models/transforms/seeds/ensemble/cutoffs/no-failures
+                Model                             Candidate Seed  Stage  N
+               SARIMA               SARIMA_Level_110_000_K0 2026 Tuning 14
+               SARIMA                 SARIMA_Log_110_000_K0 2026 Tuning 14
+ DynamicRegression_M0 DynamicRegression_M0_Level_100_000_K0 2026 Tuning 14
+ DynamicRegression_M0   DynamicRegression_M0_Log_110_000_K0 2026 Tuning 14
+ DynamicRegression_M1 DynamicRegression_M1_Level_110_000_K0 2026 Tuning 14
+ DynamicRegression_M1   DynamicRegression_M1_Log_110_000_K0 2026 Tuning 14
+ DynamicRegression_M2 DynamicRegression_M2_Level_100_000_K0 2026 Tuning 14
+ DynamicRegression_M2   DynamicRegression_M2_Log_110_000_K0 2026 Tuning 14
+ DynamicRegression_M3 DynamicRegression_M3_Level_100_000_K0 2026 Tuning 14
+ DynamicRegression_M3   DynamicRegression_M3_Log_110_000_K0 2026 Tuning 14
+ DynamicRegression_M4 DynamicRegression_M4_Level_100_000_K0 2026 Tuning 14
+ DynamicRegression_M4   DynamicRegression_M4_Log_110_000_K0 2026 Tuning 14
+                  DHR                  DHR_Level_110_000_K1 2026 Tuning 14
+                  DHR                    DHR_Log_110_000_K1 2026 Tuning 14
+                  ETS                           ETS_Level_1 2026 Tuning 14
+                  ETS                           ETS_Level_2 2026 Tuning 14
+                  ETS                           ETS_Level_3 2026 Tuning 14
+              Prophet                    Prophet_Level_0.01 2026 Tuning 14
+              Prophet                    Prophet_Level_0.05 2026 Tuning 14
+              Prophet                     Prophet_Level_0.5 2026 Tuning 14
+                  ETS                             ETS_Log_1 2026 Tuning 14
+                  ETS                             ETS_Log_2 2026 Tuning 14
+                  ETS                             ETS_Log_3 2026 Tuning 14
+              Prophet                      Prophet_Log_0.01 2026 Tuning 14
+              Prophet                      Prophet_Log_0.05 2026 Tuning 14
+              Prophet                       Prophet_Log_0.5 2026 Tuning 14
+ Seconds Failure
+    0.04      NA
+    0.00      NA
+    0.01      NA
+    0.00      NA
+    0.02      NA
+    0.00      NA
+    0.00      NA
+    0.03      NA
+    0.00      NA
+    0.02      NA
+    0.00      NA
+    0.00      NA
+    0.00      NA
+    0.00      NA
+    0.00      NA
+    0.00      NA
+    0.00      NA
+    0.00      NA
+    0.02      NA
+    0.00      NA
+    0.00      NA
+    0.00      NA
+    0.00      NA
+    0.01      NA
+    0.00      NA
+    0.00      NA
+PASS 06 schema/dates/14-days/all-models/transforms/seeds/ensemble/cutoffs/no-failures
+               Model                        Candidate Seed  Stage  N Seconds
+        RandomForest             RandomForest_Level_1 2026 Tuning 14    7.23
+        RandomForest               RandomForest_Log_1 2026 Tuning 14    3.22
+        RandomForest        RandomForest_Difference_1 2026 Tuning 14    7.27
+                 SVR                      SVR_Level_1 2026 Tuning 14    1.55
+                 SVR                        SVR_Log_1 2026 Tuning 14    1.67
+                 SVR                 SVR_Difference_1 2026 Tuning 14    1.74
+ XGBoost_Transformed      XGBoost_Transformed_Level_1 2026 Tuning 14    5.56
+ XGBoost_Transformed        XGBoost_Transformed_Log_1 2026 Tuning 14    5.92
+ XGBoost_Transformed XGBoost_Transformed_Difference_1 2026 Tuning 14    6.52
+ Failure
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+PASS 07 schema/dates/14-days/all-models/transforms/seeds/ensemble/cutoffs/no-failures
+         Model                  Candidate Seed            Stage  N Seconds
+ LSTM_Improved      LSTM_Improved_Level_1 2026           Tuning 14   52.14
+ LSTM_Improved        LSTM_Improved_Log_1 2026           Tuning 14   99.62
+ LSTM_Improved LSTM_Improved_Difference_1 2026           Tuning 14  124.97
+           GRU                GRU_Level_1 2026           Tuning 14   54.64
+           GRU                  GRU_Log_1 2026           Tuning 14   80.65
+           GRU           GRU_Difference_1 2026           Tuning 14   61.16
+          NNAR           NNAR_Level_FALSE 2026           Tuning 14  152.45
+          NNAR            NNAR_Level_TRUE 2026           Tuning 14  529.56
+          NNAR             NNAR_Log_FALSE 2026           Tuning 14   61.61
+          NNAR              NNAR_Log_TRUE 2026           Tuning 14  171.70
+ LSTM_Improved        LSTM_Improved_Log_1 2027 SeedConfirmation 14   47.28
+ LSTM_Improved        LSTM_Improved_Log_1 2028 SeedConfirmation 14   72.89
+ LSTM_Improved      LSTM_Improved_Level_1 2027 SeedConfirmation 14   13.79
+ LSTM_Improved      LSTM_Improved_Level_1 2028 SeedConfirmation 14   34.39
+ LSTM_Improved LSTM_Improved_Difference_1 2027 SeedConfirmation 14   64.50
+ LSTM_Improved LSTM_Improved_Difference_1 2028 SeedConfirmation 14   44.03
+           GRU                  GRU_Log_1 2027 SeedConfirmation 14   26.56
+           GRU                  GRU_Log_1 2028 SeedConfirmation 14   16.63
+           GRU           GRU_Difference_1 2027 SeedConfirmation 14   19.62
+           GRU           GRU_Difference_1 2028 SeedConfirmation 14   20.80
+           GRU                GRU_Level_1 2027 SeedConfirmation 14   33.61
+           GRU                GRU_Level_1 2028 SeedConfirmation 14   24.45
+          NNAR              NNAR_Log_TRUE 2027 SeedConfirmation 14   88.48
+          NNAR              NNAR_Log_TRUE 2028 SeedConfirmation 14   87.48
+ Failure
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+PASS full-grid counts (06=90,07=76), original XGBoost grid identity, all target inverses
+<environment: R_GlobalEnv>
+PASS target-day/future observations cannot change target-day inputs; early-stop holdout temperature cannot change inner-training features

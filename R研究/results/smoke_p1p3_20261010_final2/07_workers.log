@@ -1,0 +1,52 @@
+starting worker pid=24400 on localhost:11930 at 19:04:53.693
+starting worker pid=11092 on localhost:11930 at 19:04:53.728
+Backend: Python=C:/Users/Lenovo/AppData/Local/USEP-phase2/python/Scripts/python.exe; TensorFlow=2.21.0; Keras=3.15.1
+Backend: Python=C:/Users/Lenovo/AppData/Local/USEP-phase2/python/Scripts/python.exe; TensorFlow=2.21.0; Keras=3.15.1
+LSTM_Improved LSTM_Improved_Level_1 seed=2026 cutoff=2024-12-31 OK
+GRU GRU_Level_1 seed=2026 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Level_1 seed=2026 cutoff=2025-01-07 OK
+GRU GRU_Level_1 seed=2026 cutoff=2025-01-07 OK
+GRU GRU_Log_1 seed=2026 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Log_1 seed=2026 cutoff=2024-12-31 OK
+GRU GRU_Log_1 seed=2026 cutoff=2025-01-07 OK
+LSTM_Improved LSTM_Improved_Log_1 seed=2026 cutoff=2025-01-07 OK
+GRU GRU_Difference_1 seed=2026 cutoff=2024-12-31 OK
+GRU GRU_Difference_1 seed=2026 cutoff=2025-01-07 OK
+LSTM_Improved LSTM_Improved_Difference_1 seed=2026 cutoff=2024-12-31 OK
+NNAR NNAR_Level_FALSE seed=2026 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Difference_1 seed=2026 cutoff=2025-01-07 OK
+NNAR NNAR_Level_FALSE seed=2026 cutoff=2025-01-07 OK
+NNAR NNAR_Level_TRUE seed=2026 cutoff=2024-12-31 OK
+NNAR NNAR_Level_TRUE seed=2026 cutoff=2025-01-07 OK
+NNAR NNAR_Log_FALSE seed=2026 cutoff=2024-12-31 OK
+NNAR NNAR_Log_FALSE seed=2026 cutoff=2025-01-07 OK
+NNAR NNAR_Log_TRUE seed=2026 cutoff=2024-12-31 OK
+NNAR NNAR_Log_TRUE seed=2026 cutoff=2025-01-07 OK
+LSTM_Improved LSTM_Improved_Level_1 seed=2027 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Level_1 seed=2027 cutoff=2025-01-07 OK
+LSTM_Improved LSTM_Improved_Log_1 seed=2027 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Level_1 seed=2028 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Log_1 seed=2027 cutoff=2025-01-07 OK
+LSTM_Improved LSTM_Improved_Level_1 seed=2028 cutoff=2025-01-07 OK
+LSTM_Improved LSTM_Improved_Difference_1 seed=2027 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Log_1 seed=2028 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Difference_1 seed=2027 cutoff=2025-01-07 OK
+LSTM_Improved LSTM_Improved_Log_1 seed=2028 cutoff=2025-01-07 OK
+LSTM_Improved LSTM_Improved_Difference_1 seed=2028 cutoff=2024-12-31 OK
+LSTM_Improved LSTM_Improved_Difference_1 seed=2028 cutoff=2025-01-07 OK
+GRU GRU_Difference_1 seed=2027 cutoff=2024-12-31 OK
+GRU GRU_Log_1 seed=2027 cutoff=2024-12-31 OK
+GRU GRU_Difference_1 seed=2027 cutoff=2025-01-07 OK
+GRU GRU_Log_1 seed=2027 cutoff=2025-01-07 OK
+GRU GRU_Difference_1 seed=2028 cutoff=2024-12-31 OK
+GRU GRU_Log_1 seed=2028 cutoff=2024-12-31 OK
+GRU GRU_Difference_1 seed=2028 cutoff=2025-01-07 OK
+GRU GRU_Log_1 seed=2028 cutoff=2025-01-07 OK
+GRU GRU_Level_1 seed=2027 cutoff=2024-12-31 OK
+GRU GRU_Level_1 seed=2027 cutoff=2025-01-07 OK
+GRU GRU_Level_1 seed=2028 cutoff=2024-12-31 OK
+GRU GRU_Level_1 seed=2028 cutoff=2025-01-07 OK
+NNAR NNAR_Log_TRUE seed=2028 cutoff=2024-12-31 OK
+NNAR NNAR_Log_TRUE seed=2027 cutoff=2024-12-31 OK
+NNAR NNAR_Log_TRUE seed=2028 cutoff=2025-01-07 OK
+NNAR NNAR_Log_TRUE seed=2027 cutoff=2025-01-07 OK

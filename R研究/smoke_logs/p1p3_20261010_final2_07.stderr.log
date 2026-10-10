@@ -1,0 +1,4 @@
+Error in phase_run(state, p3_candidates(state$opt$mode)) : 
+  模型全部候选失败：LSTM_Improved；见 initial 调参日志。
+Calls: p3_main -> phase_run
+Execution halted

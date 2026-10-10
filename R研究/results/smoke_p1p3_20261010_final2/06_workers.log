@@ -1,0 +1,20 @@
+starting worker pid=30124 on localhost:11022 at 18:55:55.826
+starting worker pid=23136 on localhost:11022 at 18:55:55.842
+RandomForest RandomForest_Difference_1 seed=2026 cutoff=2024-12-31 OK
+RandomForest RandomForest_Level_1 seed=2026 cutoff=2024-12-31 OK
+RandomForest RandomForest_Level_1 seed=2026 cutoff=2025-01-07 OK
+RandomForest RandomForest_Difference_1 seed=2026 cutoff=2025-01-07 OK
+SVR SVR_Level_1 seed=2026 cutoff=2024-12-31 OK
+RandomForest RandomForest_Log_1 seed=2026 cutoff=2024-12-31 OK
+SVR SVR_Level_1 seed=2026 cutoff=2025-01-07 OK
+SVR SVR_Log_1 seed=2026 cutoff=2024-12-31 OK
+RandomForest RandomForest_Log_1 seed=2026 cutoff=2025-01-07 OK
+SVR SVR_Log_1 seed=2026 cutoff=2025-01-07 OK
+SVR SVR_Difference_1 seed=2026 cutoff=2024-12-31 OK
+SVR SVR_Difference_1 seed=2026 cutoff=2025-01-07 OK
+XGBoost_Transformed XGBoost_Transformed_Log_1 seed=2026 cutoff=2024-12-31 OK
+XGBoost_Transformed XGBoost_Transformed_Level_1 seed=2026 cutoff=2024-12-31 OK
+XGBoost_Transformed XGBoost_Transformed_Log_1 seed=2026 cutoff=2025-01-07 OK
+XGBoost_Transformed XGBoost_Transformed_Level_1 seed=2026 cutoff=2025-01-07 OK
+XGBoost_Transformed XGBoost_Transformed_Difference_1 seed=2026 cutoff=2024-12-31 OK
+XGBoost_Transformed XGBoost_Transformed_Difference_1 seed=2026 cutoff=2025-01-07 OK

@@ -1,0 +1,44 @@
+starting worker pid=10248 on localhost:11807 at 18:57:01.550
+starting worker pid=25764 on localhost:11807 at 18:57:01.579
+Error in file.exists(candidate) : 
+  file name conversion problem -- name too long?
+Error in file.exists(candidate) : 
+  file name conversion problem -- name too long?
+Downloading uv...Downloading uv...Error in download.file(paste0("https://astral.sh/uv/install", file_ext),  : 
+  cannot open URL 'https://astral.sh/uv/install.ps1'
+Error in download.file(paste0("https://astral.sh/uv/install", file_ext),  : 
+  cannot open URL 'https://astral.sh/uv/install.ps1'
+FAILED GRU_Level_1: Installation of Python not found, Python bindings not loaded.
+See the Python "Order of Discovery" here: https://rstudio.github.io/reticulate/articles/versions.html#order-of-discovery.
+FAILED LSTM_Improved_Level_1: Installation of Python not found, Python bindings not loaded.
+See the Python "Order of Discovery" here: https://rstudio.github.io/reticulate/articles/versions.html#order-of-discovery.
+Error in file.exists(candidate) : 
+  file name conversion problem -- name too long?
+Error in file.exists(candidate) : 
+  file name conversion problem -- name too long?
+Downloading uv...Downloading uv...Error in download.file(paste0("https://astral.sh/uv/install", file_ext),  : 
+  cannot open URL 'https://astral.sh/uv/install.ps1'
+Error in download.file(paste0("https://astral.sh/uv/install", file_ext),  : 
+  cannot open URL 'https://astral.sh/uv/install.ps1'
+FAILED LSTM_Improved_Log_1: Installation of Python not found, Python bindings not loaded.
+See the Python "Order of Discovery" here: https://rstudio.github.io/reticulate/articles/versions.html#order-of-discovery.
+FAILED GRU_Log_1: Installation of Python not found, Python bindings not loaded.
+See the Python "Order of Discovery" here: https://rstudio.github.io/reticulate/articles/versions.html#order-of-discovery.
+Error in file.exists(candidate) : 
+  file name conversion problem -- name too long?
+Error in file.exists(candidate) : 
+  file name conversion problem -- name too long?
+Downloading uv...Downloading uv...Error in download.file(paste0("https://astral.sh/uv/install", file_ext),  : 
+  cannot open URL 'https://astral.sh/uv/install.ps1'
+Error in download.file(paste0("https://astral.sh/uv/install", file_ext),  : 
+  cannot open URL 'https://astral.sh/uv/install.ps1'
+FAILED GRU_Difference_1: Installation of Python not found, Python bindings not loaded.
+See the Python "Order of Discovery" here: https://rstudio.github.io/reticulate/articles/versions.html#order-of-discovery.
+FAILED LSTM_Improved_Difference_1: Installation of Python not found, Python bindings not loaded.
+See the Python "Order of Discovery" here: https://rstudio.github.io/reticulate/articles/versions.html#order-of-discovery.
+FAILED NNAR_Level_TRUE: too many (1276) weights
+NNAR NNAR_Log_FALSE seed=2026 cutoff=2024-12-31 OK
+NNAR NNAR_Level_FALSE seed=2026 cutoff=2024-12-31 OK
+NNAR NNAR_Log_FALSE seed=2026 cutoff=2025-01-07 OK
+FAILED NNAR_Log_TRUE: too many (1276) weights
+NNAR NNAR_Level_FALSE seed=2026 cutoff=2025-01-07 OK
