@@ -164,21 +164,24 @@ path$DailyUSEP[path$Date == dates[h]] <- prediction[h]
 stopifnot(all(is.finite(prediction)))
 return(list(path = data.frame(Origin = origin, Date = dates, Horizon = seq_len(horizon), Prediction = prediction), scenario = scenario))
 }
-# 递归回测：2026 测试期每周重估日为起点、路径完全落在测试期内，按步长取实际减预测误差。
+# 递归回测：以 2026 测试期每周重估日为起点，凡 31 日路径在数据截止日（2026-09-30）前已全部实现的都纳入，按步长取实际减预测误差。
 horizon <- 31L
 origins <- test_dates[seq(1L, length(test_dates), by = refit_days)]
-origins <- origins[origins + horizon - 1L <= freeze_end]
+origins <- origins[origins + horizon - 1L <= new_end_date]
 backtest <- bind_rows(lapply(origins, function(origin) checkpoint(paste0("backtest_", origin), recursive_lstm(origin, horizon))$path))
 backtest$Actual <- daily$DailyUSEP[match(backtest$Date, daily$Date)]
 backtest$Error <- backtest$Actual - backtest$Prediction
 horizon_errors <- backtest |> group_by(Horizon) |> summarise(N = n(), MAE = mean(abs(Error)), RMSE = sqrt(mean(Error^2)), MeanError = mean(Error), Radius80 = rank_quantile(abs(Error), 0.80), Radius95 = rank_quantile(abs(Error), 0.95), .groups = "drop") |> as.data.frame()
-# 以 2026-09-30 为数据截止：LSTM 10 月路径，区间为点预测加减同步长回测误差分位数。
+# 每个步长只有约 35 个误差，分位数随步长跳动；区间半径取到该步长为止的累计最大值，使区间随步长单调变宽。
+horizon_errors$Radius80_Band <- cummax(horizon_errors$Radius80)
+horizon_errors$Radius95_Band <- cummax(horizon_errors$Radius95)
+# 以 2026-09-30 为数据截止：LSTM 10 月路径，区间为点预测加减上述单调化的同步长回测误差分位数。
 next_date <- end_date + 1L
 october_dates <- next_date + seq_len(horizon) - 1L
 october_lstm <- checkpoint("october_LSTM", recursive_lstm(next_date, horizon))
 october <- data.frame(Date = october_dates, Horizon = seq_len(horizon), Weekday = weekdays(october_dates), PublicHoliday = as.integer(october_dates %in% holiday_dates), LSTM = october_lstm$path$Prediction)
-october[c("LSTM_Lower80", "LSTM_Upper80")] <- list(october$LSTM - horizon_errors$Radius80, october$LSTM + horizon_errors$Radius80)
-october[c("LSTM_Lower95", "LSTM_Upper95")] <- list(october$LSTM - horizon_errors$Radius95, october$LSTM + horizon_errors$Radius95)
+october[c("LSTM_Lower80", "LSTM_Upper80")] <- list(october$LSTM - horizon_errors$Radius80_Band, october$LSTM + horizon_errors$Radius80_Band)
+october[c("LSTM_Lower95", "LSTM_Upper95")] <- list(october$LSTM - horizon_errors$Radius95_Band, october$LSTM + horizon_errors$Radius95_Band)
 # 对照：ETS、SARIMA 只用价格历史，按冻结规格在截止日拟合后直接做 31 步预测，区间为模型区间。
 history <- ts(daily$DailyUSEP[daily$Date <= end_date], frequency = 7)
 native <- list(ETS = ets(history, model = freeze$models$ETS$config$model, damped = freeze$models$ETS$config$damped), SARIMA = Arima(history, order = freeze$models$SARIMA$config$order, seasonal = list(order = freeze$models$SARIMA$config$seasonal, period = 7), include.constant = TRUE, method = "ML"))
@@ -209,12 +212,12 @@ panel_models <- c("LSTM", "XGBoost", "ETS", "SARIMA")
 panel_labels <- setNames(sprintf("%s (September RMSE %.2f)", panel_models, september_scores$RMSE[match(panel_models, september_scores$Model)]), panel_models)
 fig5_data <- september_daily[september_daily$Model %in% panel_models, ]
 fig5_data$Panel <- factor(panel_labels[fig5_data$Model], levels = panel_labels)
-fig5 <- ggplot(fig5_data, aes(Date)) + geom_ribbon(aes(ymin = Lower95, ymax = Upper95, fill = "95% empirical interval")) + geom_line(aes(y = Prediction, colour = "Forecast"), linewidth = 0.45) + geom_line(aes(y = Actual, colour = "Actual"), linewidth = 0.4) + geom_point(aes(y = Actual, colour = "Actual"), size = 0.8) + facet_wrap(~Panel, ncol = 2) + scale_fill_manual(values = "#b7d3f6", name = NULL) + scale_colour_manual(values = c(Actual = "#0b0b0b", Forecast = "#2a78d6"), name = NULL) + labs(x = NULL, y = "Daily USEP (SGD/MWh)", caption = "Source: EMC USEP; MSS daily temperature for September 2026. One-day-ahead forecasts, 2026-09-01 to 2026-09-30, frozen settings with 7-day\nexpanding refits; intervals from up to 180 previously realised absolute errors. Authors' calculations in R.") + figure_theme
+fig5 <- ggplot(fig5_data, aes(Date)) + geom_ribbon(aes(ymin = Lower95, ymax = Upper95, fill = "95% empirical interval")) + geom_line(aes(y = Prediction, colour = "Forecast"), linewidth = 0.45) + geom_line(aes(y = Actual, colour = "Actual"), linewidth = 0.4) + geom_point(aes(y = Actual, colour = "Actual"), size = 0.8) + facet_wrap(~Panel, ncol = 2) + scale_fill_manual(values = "#b7d3f6", name = NULL) + scale_colour_manual(values = c(Actual = "#0b0b0b", Forecast = "#2a78d6"), name = NULL) + labs(x = NULL, y = "Daily USEP (SGD/MWh)", caption = "Source: EMC USEP; MSS daily temperature for September 2026. One-day-ahead forecasts for 1-30 September 2026 under frozen\nsettings with 7-day expanding refits; intervals from up to 180 previously realised absolute errors. Authors' calculations in R.") + figure_theme
 ggsave(file.path(output_dir, "fig5_september_check.png"), fig5, width = 7, height = 5.2, dpi = 300, bg = "white")
 recent <- data.frame(Date = daily$Date[daily$Date >= as.Date("2026-08-01") & daily$Date <= end_date], Actual = daily$DailyUSEP[daily$Date >= as.Date("2026-08-01") & daily$Date <= end_date])
 paths <- bind_rows(lapply(c("LSTM", "ETS", "SARIMA"), function(kind) data.frame(Date = october$Date, Series = paste(kind, "path"), Value = october[[kind]])))
 paths$Series <- factor(paths$Series, levels = c("LSTM path", "ETS path", "SARIMA path"))
-fig6 <- ggplot() + geom_ribbon(data = october, aes(Date, ymin = LSTM_Lower95, ymax = LSTM_Upper95, fill = "LSTM 95%")) + geom_ribbon(data = october, aes(Date, ymin = LSTM_Lower80, ymax = LSTM_Upper80, fill = "LSTM 80%")) + geom_vline(xintercept = end_date + 0.5, linetype = "dashed", colour = "#52514e", linewidth = 0.3) + geom_line(data = recent, aes(Date, Actual), colour = "#0b0b0b", linewidth = 0.4) + geom_line(data = paths, aes(Date, Value, colour = Series, linetype = Series), linewidth = 0.5) + geom_point(data = october[!is.na(october$Actual), ], aes(Date, Actual), colour = "#0b0b0b", size = 1.4) + annotate("text", x = end_date, y = Inf, label = "Data cut-off 2026-09-30", hjust = 1.05, vjust = 1.5, size = 2.8, colour = "#52514e") + scale_fill_manual(values = c("LSTM 95%" = "#cde2fb", "LSTM 80%" = "#86b6ef"), name = NULL) + scale_colour_manual(values = c("LSTM path" = "#2a78d6", "ETS path" = "#eb6834", "SARIMA path" = "#1baf7a"), name = NULL) + scale_linetype_manual(values = c("LSTM path" = "solid", "ETS path" = "dashed", "SARIMA path" = "dotdash"), name = NULL) + labs(x = NULL, y = "Daily USEP (SGD/MWh)", caption = "Source: EMC USEP; MSS daily temperature. Black line: actual daily USEP, August-September 2026; black dot: 1 October actual (ex post). LSTM path is recursive:\nprice lags use earlier forecasts and demand, reserve, regulation, BrentSGD and temperature are held at their 24-30 September means (scenario assumption).\nLSTM bands: horizon-specific absolute-error quantiles from recursive back-tests in January-August 2026. ETS and SARIMA: native 31-step forecasts. Authors' calculations in R.") + figure_theme + theme(legend.box = "vertical")
+fig6 <- ggplot() + geom_ribbon(data = october, aes(Date, ymin = LSTM_Lower95, ymax = LSTM_Upper95, fill = "LSTM 95%")) + geom_ribbon(data = october, aes(Date, ymin = LSTM_Lower80, ymax = LSTM_Upper80, fill = "LSTM 80%")) + geom_vline(xintercept = end_date + 0.5, linetype = "dashed", colour = "#52514e", linewidth = 0.3) + geom_line(data = recent, aes(Date, Actual), colour = "#0b0b0b", linewidth = 0.4) + geom_line(data = paths, aes(Date, Value, colour = Series, linetype = Series), linewidth = 0.5) + geom_point(data = october[!is.na(october$Actual), ], aes(Date, Actual), colour = "#0b0b0b", size = 1.4) + annotate("text", x = end_date, y = Inf, label = "Data cut-off 2026-09-30", hjust = 1.05, vjust = 1.5, size = 2.8, colour = "#52514e") + scale_fill_manual(values = c("LSTM 95%" = "#cde2fb", "LSTM 80%" = "#86b6ef"), name = NULL) + scale_colour_manual(values = c("LSTM path" = "#2a78d6", "ETS path" = "#eb6834", "SARIMA path" = "#1baf7a"), name = NULL) + scale_linetype_manual(values = c("LSTM path" = "solid", "ETS path" = "dashed", "SARIMA path" = "dotdash"), name = NULL) + labs(x = NULL, y = "Daily USEP (SGD/MWh)", caption = "Source: EMC USEP; MSS daily temperature. Black line: actual daily USEP, August-September 2026; black dot: 1 October actual (ex post).\nLSTM path is recursive: price lags use earlier forecasts; demand, reserve, regulation, BrentSGD and temperature are held at their\n24-30 September means (scenario assumption). LSTM bands: running maximum over horizons of absolute-error quantiles from recursive\nback-tests starting weekly from 1 January to 27 August 2026. ETS and SARIMA: native 31-step forecasts. Authors' calculations in R.") + figure_theme
 ggsave(file.path(output_dir, "fig6_october_forecast.png"), fig6, width = 7, height = 4.4, dpi = 300, bg = "white")
 stopifnot(identical(tools::md5sum(names(existing_md5)), existing_md5))
 message("9 月检验与实际预测完成：结果写入 ", file.path(output_dir, output_file), "；已有结果文件未改动。")
