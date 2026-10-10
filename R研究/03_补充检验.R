@@ -14,9 +14,10 @@ frozen_md5 <- tools::md5sum(frozen_files)
 # 01 末尾会把数据处理结果写回 results/；这里只执行其余语句，取得 daily、initial_data 和 prepare_features()。
 for (e in as.list(parse("01_数据处理与变量生成.R", encoding = "UTF-8"))) if (!(is.call(e) && deparse(e[[1]]) %in% c("write_xlsx", "saveRDS", "message"))) eval(e, globalenv())
 stopifnot(isTRUE(all.equal(daily, readRDS(file.path(output_dir, "数据处理对象.rds"))$daily)))
-# 评分、特征组合与缺值处理函数直接取自 02，保证与冻结结果同一定义；02 的建模和写文件语句不执行。
-from_02 <- c("validation_dates", "test_dates", "train_y", "mase_scale", "spike_threshold", "score", "feature_names", "fit_scaler", "transform_x")
+# 样本日期、MASE 分母和尖峰阈值取自 02 的赋值语句，评分与特征函数来自 02 共用的 模型函数.R；02 的建模和写文件语句不执行。
+from_02 <- c("validation_dates", "test_dates", "train_y", "mase_scale", "spike_threshold")
 for (e in as.list(parse("02_模型验证与研究结果.R", encoding = "UTF-8"))) if (is.call(e) && identical(e[[1]], as.name("<-")) && is.name(e[[2]]) && as.character(e[[2]]) %in% from_02) eval(e, globalenv())
+source("模型函数.R", encoding = "UTF-8")
 freeze <- readRDS(file.path(output_dir, "冻结的研究设置.rds"))
 stopifnot(isTRUE(all.equal(mase_scale, freeze$mase_scale)), isTRUE(all.equal(spike_threshold, freeze$spike_threshold)), identical(temperature_lambda, freeze$temperature_lambda))
 read_dated <- function(sheet) {
@@ -52,16 +53,16 @@ for (period in c("Validation", "Test")) {
 p <- samples[[period]]
 for (kind in models) benchmark <- rbind(benchmark, cbind(Period = period, Model = kind, score(p$Actual, p[[kind]]), MAERatioVsSeasonalNaive = mean(abs(p[[kind]] - p$Actual)) / mean(abs(p$SeasonalNaive - p$Actual)), MAERatioVsPreviousDay = mean(abs(p[[kind]] - p$Actual)) / mean(abs(p$PreviousDay - p$Actual))))
 }
-# 样本外一步误差定义为预测减实际；Ljung-Box 滞后 14，样本外误差不扣模型自由度。
+# 样本外一步误差定义为实际减预测（正值表示低估，与报告表 9 一致）；Ljung-Box 滞后 14，样本外误差不扣模型自由度。
 ljung_box <- data.frame()
 for (kind in models) {
 row <- data.frame(Model = kind)
 for (period in c("Validation", "Test")) {
-error <- samples[[period]][[kind]] - samples[[period]]$Actual
+error <- samples[[period]]$Actual - samples[[period]][[kind]]
 lb <- Box.test(error, lag = 14L, type = "Ljung-Box")
 row[paste0(period, c("_N", "_Q", "_df", "_p"))] <- list(length(error), unname(lb$statistic), unname(lb$parameter), lb$p.value)
 }
-row$Test_MeanError <- mean(test[[kind]] - test$Actual)
+row$Test_MeanError <- mean(test$Actual - test[[kind]])
 ljung_box <- rbind(ljung_box, row)
 }
 # 样本内残差：在初始训练期末按冻结规格各拟合一次，即 02 在 2024-12-31 截止时的首个模型。
@@ -128,7 +129,7 @@ data.frame(Item = paste("Correlation with same-day USEP:", c("ContingencyReserve
 data.frame(Item = paste("PrimaryReserve", c("mean", "median", "skewness")), Sample = "Train", N = nrow(train_days), Value = c(mean(train_days$PrimaryReserve), median(train_days$PrimaryReserve), skewness(train_days$PrimaryReserve)), Note = "Daily mean of 48 periods, SGD/MWh"),
 data.frame(Item = paste("PrimaryReserve", c("mean", "median", "skewness")), Sample = "Test", N = nrow(test_days), Value = c(mean(test_days$PrimaryReserve), median(test_days$PrimaryReserve), skewness(test_days$PrimaryReserve)), Note = "Daily mean of 48 periods, SGD/MWh"),
 data.frame(Item = "Correlation: ContingencyReserve vs Regulation", Sample = "Train", N = nrow(train_days), Value = cor(train_days$ContingencyReserve, train_days$Regulation), Note = "Pearson; same-day daily means"),
-data.frame(Item = "LSTM mean error", Sample = "Test", N = nrow(test), Value = mean(test$LSTM - test$Actual), Note = "Prediction minus actual, SGD/MWh; negative = under-prediction on average"))
+data.frame(Item = "LSTM mean error", Sample = "Test", N = nrow(test), Value = mean(test$Actual - test$LSTM), Note = "Actual minus prediction, SGD/MWh; positive = under-prediction on average"))
 # 增量表累计与边际改善按未四舍五入的测试 RMSE 重新计算，并与 02 的结果核对。
 incremental_scores <- as.data.frame(read_excel(file.path(output_dir, "研究结果.xlsx"), sheet = "Incremental"))
 for (kind in c("DynamicRegression", "XGBoost")) {
