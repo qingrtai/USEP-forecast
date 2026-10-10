@@ -14,8 +14,11 @@ phase_args <- function(id) {
   stopifnot(is.finite(workers), workers >= 1L, workers <= 6L)
   run <- get("run", format(Sys.time(), "%Y%m%d_%H%M%S"))
   stopifnot(grepl("^[A-Za-z0-9_-]+$", run))
-  list(id = id, mode = mode, workers = workers, run = run,
-       out = if (mode == "smoke") file.path("results", paste0("smoke_", run)) else "results")
+  out <- if (mode == "smoke") file.path("results", paste0("smoke_", run)) else "results"
+  # 正式模式只把工作簿写进 results/；worker 日志与初筛/调参 CSV 写进 Git 忽略的中间结果目录。
+  # 这样 results/ 顶层在运行期间没有不断变化的文件：三个脚本同时运行时互不触发哈希检查，续跑时指纹也不变。
+  list(id = id, mode = mode, workers = workers, run = run, out = out,
+       aux = if (mode == "smoke") out else file.path("results", "扩充_中间结果"))
 }
 
 phase_packages <- function() {
@@ -82,6 +85,7 @@ phase_start <- function(id, entry) {
   phase_packages()
   opt <- phase_args(id)
   dir.create(opt$out, recursive = TRUE, showWarnings = FALSE)
+  dir.create(opt$aux, recursive = TRUE, showWarnings = FALSE)
   target <- file.path(opt$out, paste0("扩充_", id, ".xlsx"))
   if (file.exists(target)) stop("拒绝覆盖现有工作簿：", target, "；smoke 请使用新 --run。")
   protected <- c(list.files("results", full.names = TRUE), list.files(".", pattern = "\\.xlsx$", full.names = TRUE), list.files("raw_202609", full.names = TRUE), c("01_数据处理与变量生成.R", "02_模型验证与研究结果.R", "模型函数.R", "03_补充检验.R", "04_9月检验与实际预测.R"))
@@ -112,7 +116,7 @@ phase_start <- function(id, entry) {
   context <- c(opt, list(cache = cache, fingerprint = fingerprint))
   assign(".phase", context, globalenv())
   assign(".feature_cache", new.env(parent = emptyenv()), globalenv())
-  cl <- parallel::makePSOCKcluster(opt$workers, outfile = file.path(opt$out, paste0(id, "_workers.log")))
+  cl <- parallel::makePSOCKcluster(opt$workers, outfile = file.path(opt$aux, paste0(id, "_workers.log")))
   tryCatch(parallel::clusterCall(cl, phase_worker_init, normalizePath(payload, winslash = "/"), entry, getwd(), .libPaths(), context), error = function(e) {parallel::stopCluster(cl); stop(e)})
   list(opt = opt, cl = cl, hash = hash, target = target, versions = versions, fingerprint = fingerprint)
 }
@@ -201,7 +205,7 @@ phase_run <- function(state, configs, screening = data.frame()) {
   dates <- phase_dates(state$opt$mode)
   results <- phase_map(state, phase_jobs(configs, dates))
   tuning <- bind_rows(lapply(results, `[[`, "log"))
-  write.csv(tuning, file.path(state$opt$out, paste0(state$opt$id, "_tuning_initial.csv")), row.names = FALSE, fileEncoding = "UTF-8")
+  write.csv(tuning, file.path(state$opt$aux, paste0(state$opt$id, "_tuning_initial.csv")), row.names = FALSE, fileEncoding = "UTF-8")
   models <- unique(vapply(configs, `[[`, character(1), "Model"))
   neural_models <- c("LSTM_Improved", "GRU", "NNAR")
   finalists <- setNames(lapply(models, function(model) {

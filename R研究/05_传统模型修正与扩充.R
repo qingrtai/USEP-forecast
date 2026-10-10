@@ -72,7 +72,7 @@ p1_candidates <- function(state) {
     screening[[length(screening) + 1L]] <- logs
     for (i in chosen) add(fits[[i]]$config)
     # 初筛日志即时落盘，中断也可查失败原因；不是最终研究输出。
-    write.csv(bind_rows(screening), file.path(state$opt$out, "05_screening.csv"), row.names = FALSE, fileEncoding = "UTF-8")
+    write.csv(bind_rows(screening), file.path(state$opt$aux, "05_screening.csv"), row.names = FALSE, fileEncoding = "UTF-8")
   }
   for (transform in c("Level", "Log")) {
     for (i in 1:3) add(list(Model = "ETS", Kind = "ETS", Step = 4L, Transform = transform,

@@ -89,6 +89,7 @@ Codex 额度用完时 07 的重试进程（19:04 启动，Run 仍为 `p1p3_20261
 2. `phase_task`：每周的拟合 + 预测耗时作为 `seconds` 属性存进周缓存，Tuning 的 Seconds 是各周耗时之和，续跑时读回缓存中的数值。上文第 1 条的问题由此解决。
 3. 指纹不再包含 `results/扩充_05.xlsx` 等 05–07 的正式输出。原来一个脚本写出工作簿后，其余脚本续跑时指纹会变、缓存全部失效。这一条不在审核意见里，是本地另加的。
 4. `试跑校验.R` 可在目录后加脚本编号，只检查部分工作簿（本次为 `07`）。
+5. full 模式下 worker 日志、`05_screening.csv` 和 `*_tuning_initial.csv` 改写到 `results/扩充_中间结果/`，`results/` 顶层只新增 `扩充_05/06/07.xlsx`。原来这些文件写在 `results/` 顶层，会被同时运行的另外两个脚本算进受保护文件的哈希（结束时的哈希检查会误报），也会改变续跑时的指纹。smoke 模式的路径不变。这一条在 07 复跑之后才改，同样不在审核意见里。
 
 结果：`扩充_07.xlsx` 的 Daily、Frozen、SeedDaily 与 `final2` 完全相同，Tuning 除 Seconds 外完全相同；校验全部 PASS（`p1p3_20261010_final3_validation.stdout.log`）。Test/September 的合并路径 smoke 不会执行，另用合成任务比对过新旧 `phase_run` 在 full 模式下的四张表，结果一致。
 
