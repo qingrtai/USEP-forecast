@@ -1,0 +1,54 @@
+PASS 07 schema/dates/14-days/all-models/transforms/seeds/ensemble/cutoffs/no-failures
+         Model                  Candidate Seed            Stage  N Seconds
+ LSTM_Improved      LSTM_Improved_Level_1 2026           Tuning 14  103.97
+ LSTM_Improved        LSTM_Improved_Log_1 2026           Tuning 14  171.36
+ LSTM_Improved LSTM_Improved_Difference_1 2026           Tuning 14  183.14
+           GRU                GRU_Level_1 2026           Tuning 14  114.47
+           GRU                  GRU_Log_1 2026           Tuning 14  127.23
+           GRU           GRU_Difference_1 2026           Tuning 14  107.65
+          NNAR           NNAR_Level_FALSE 2026           Tuning 14  106.36
+          NNAR            NNAR_Level_TRUE 2026           Tuning 14  130.36
+          NNAR             NNAR_Log_FALSE 2026           Tuning 14   56.52
+          NNAR              NNAR_Log_TRUE 2026           Tuning 14   81.67
+ LSTM_Improved        LSTM_Improved_Log_1 2027 SeedConfirmation 14   36.53
+ LSTM_Improved        LSTM_Improved_Log_1 2028 SeedConfirmation 14   33.03
+ LSTM_Improved      LSTM_Improved_Level_1 2027 SeedConfirmation 14   16.65
+ LSTM_Improved      LSTM_Improved_Level_1 2028 SeedConfirmation 14   18.85
+ LSTM_Improved LSTM_Improved_Difference_1 2027 SeedConfirmation 14   27.95
+ LSTM_Improved LSTM_Improved_Difference_1 2028 SeedConfirmation 14   31.87
+           GRU                  GRU_Log_1 2027 SeedConfirmation 14   33.14
+           GRU                  GRU_Log_1 2028 SeedConfirmation 14   20.53
+           GRU           GRU_Difference_1 2027 SeedConfirmation 14   24.92
+           GRU           GRU_Difference_1 2028 SeedConfirmation 14   26.91
+           GRU                GRU_Level_1 2027 SeedConfirmation 14   33.45
+           GRU                GRU_Level_1 2028 SeedConfirmation 14   22.86
+          NNAR              NNAR_Log_TRUE 2027 SeedConfirmation 14   66.39
+          NNAR              NNAR_Log_TRUE 2028 SeedConfirmation 14   60.67
+ Failure
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+      NA
+PASS full-grid counts (06=90,07=76), original XGBoost grid identity, all target inverses
+<environment: R_GlobalEnv>
+PASS target-day/future observations cannot change target-day inputs; early-stop holdout temperature cannot change inner-training features

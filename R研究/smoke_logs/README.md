@@ -81,4 +81,15 @@ Codex 额度用完时 07 的重试进程（19:04 启动，Run 仍为 `p1p3_20261
 2. Metadata 中的 `tensorflow 2.20.0` 是 R 包版本；Python 端 TensorFlow 2.21.0、Keras 3.15.1 见 07 工作簿的 `Python_tensorflow`、`Python_keras` 两行。
 3. 07 试跑时机器上另有一个占用 14 个进程的无关任务，Seconds 偏大。两周耗时：LSTM/GRU 每个候选每种子约 15–125 秒，NNAR 带外部变量约 90–530 秒。
 
+## 审核通过后的改动与 07 复跑（2026-10-10 19:54，Run `p1p3_20261010_final3`）
+
+全量运行前改了 `扩充公共函数.R`，只重跑 07 的 smoke（5 个 worker）：
+
+1. `phase_run`：所有模型的种子确认任务合并为一次 `phase_map`，所有模型的 Test、September 冻结评估合并为一次 `phase_map`。选择逻辑、种子、各工作表的列和行顺序不变。
+2. `phase_task`：每周的拟合 + 预测耗时作为 `seconds` 属性存进周缓存，Tuning 的 Seconds 是各周耗时之和，续跑时读回缓存中的数值。上文第 1 条的问题由此解决。
+3. 指纹不再包含 `results/扩充_05.xlsx` 等 05–07 的正式输出。原来一个脚本写出工作簿后，其余脚本续跑时指纹会变、缓存全部失效。这一条不在审核意见里，是本地另加的。
+4. `试跑校验.R` 可在目录后加脚本编号，只检查部分工作簿（本次为 `07`）。
+
+结果：`扩充_07.xlsx` 的 Daily、Frozen、SeedDaily 与 `final2` 完全相同，Tuning 除 Seconds 外完全相同；校验全部 PASS（`p1p3_20261010_final3_validation.stdout.log`）。Test/September 的合并路径 smoke 不会执行，另用合成任务比对过新旧 `phase_run` 在 full 模式下的四张表，结果一致。
+
 接口依据：[forecast nnetar 的 model 更新方式](https://pkg.robjhyndman.com/forecast/reference/nnetar.html)、[Keras GRU 接口](https://keras3.posit.co/reference/layer_gru.html)、[Prophet 官方文档](https://facebook.github.io/prophet/docs/additional_topics.html)。

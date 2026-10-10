@@ -87,7 +87,8 @@ phase_start <- function(id, entry) {
   protected <- c(list.files("results", full.names = TRUE), list.files(".", pattern = "\\.xlsx$", full.names = TRUE), list.files("raw_202609", full.names = TRUE), c("01_数据处理与变量生成.R", "02_模型验证与研究结果.R", "模型函数.R", "03_补充检验.R", "04_9月检验与实际预测.R"))
   protected <- protected[file_test("-f", protected)]
   hash <- tools::md5sum(protected)
-  inputs <- c(protected, "扩充公共函数.R", entry)
+  # 05–07 的正式输出不是彼此的输入，不计入指纹；否则一个脚本写出工作簿后，其余脚本续跑时缓存全部失效。
+  inputs <- c(protected[!grepl("^扩充_[0-9]+\\.xlsx$", basename(protected))], "扩充公共函数.R", entry)
   packages <- c("forecast", "tseries", "ranger", "e1071", "prophet", "xgboost", "keras3", "tensorflow", "reticulate", "readxl", "dplyr", "tidyr", "writexl")
   versions <- setNames(vapply(packages, function(p) as.character(packageVersion(p)), character(1)), packages)
   if (id == "07") {
@@ -145,34 +146,48 @@ phase_target <- function(dat, transform) switch(transform, Level = dat$DailyUSEP
 phase_inverse <- function(z, dat, rows, transform) switch(transform, Level = z, Log = exp(z), Difference = z + dat$USEP_lag1[rows])
 
 phase_task <- function(job) {
-  started <- proc.time()[["elapsed"]]
   warnings <- character(); failure <- ""
+  # Seconds 为各周拟合 + 预测耗时之和；每周耗时随周缓存保存，续跑时读回而不是重新计时。
+  seconds <- 0; week_started <- NA_real_
   result <- tryCatch(withCallingHandlers({
     chunks <- lapply(seq(1L, length(job$dates), by = 7L), function(i) {
       dates <- job$dates[i:min(i + 6L, length(job$dates))]
       cutoff <- dates[1] - 1L
       key <- digest::digest(list(job$config, job$seed, dates), algo = "sha256")
       file <- file.path(.phase$cache, paste0("week_", key, ".rds"))
-      if (file.exists(file)) return(readRDS(file))
+      if (file.exists(file)) {
+        ans <- readRDS(file)
+        stopifnot(length(attr(ans, "seconds")) == 1L, is.finite(attr(ans, "seconds")))
+        seconds <<- seconds + attr(ans, "seconds")
+        return(ans)
+      }
       dat <- phase_features(cutoff, max(dates))
       # 所有新模型的拟合样本从统一预热终点开始；特征序列仍保留前面的上下文。
       rows <- which(dat$Date >= warmup_date & dat$Date <= cutoff)
       current <- match(dates, dat$Date)
+      week_started <<- proc.time()[["elapsed"]]
       fit <- phase_fit(job$config, dat, rows, cutoff, job$seed)
       pred <- vapply(current, function(j) phase_predict(fit, job$config, dat, rows, j), numeric(1))
       stopifnot(length(pred) == length(dates), all(is.finite(pred)))
       ans <- data.frame(Date = dates, Prediction = pred, Actual = dat$DailyUSEP[current], Cutoff = cutoff, Seed = job$seed,
                         FitDetail = if (is.null(fit$detail)) "" else phase_json(fit$detail))
+      attr(ans, "seconds") <- proc.time()[["elapsed"]] - week_started
       saveRDS(ans, file)
+      seconds <<- seconds + attr(ans, "seconds"); week_started <<- NA_real_
       message(job$config$Model, " ", job$config$Candidate, " seed=", job$seed, " cutoff=", cutoff, " OK")
       ans
     })
     bind_rows(chunks)
-  }, warning = function(w) {warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning")}), error = function(e) {failure <<- conditionMessage(e); NULL})
+  }, warning = function(w) {warnings <<- c(warnings, conditionMessage(w)); invokeRestart("muffleWarning")}), error = function(e) {
+    failure <<- conditionMessage(e)
+    # 失败的那一周不缓存，但已花费的时间仍计入本次日志。
+    if (is.finite(week_started)) seconds <<- seconds + proc.time()[["elapsed"]] - week_started
+    NULL
+  })
   rmse <- if (is.null(result)) NA_real_ else sqrt(mean((result$Actual - result$Prediction)^2))
   log <- data.frame(Model = job$config$Model, Candidate = job$config$Candidate, Transform = job$config$Transform,
                     Settings = phase_json(job$config), Seed = job$seed, Stage = job$stage, N = if (is.null(result)) 0L else nrow(result),
-                    ValidationRMSE = if (job$period == "Validation") rmse else NA_real_, Seconds = proc.time()[["elapsed"]] - started,
+                    ValidationRMSE = if (job$period == "Validation") rmse else NA_real_, Seconds = seconds,
                     Failure = failure, Warnings = paste(unique(warnings), collapse = " | "), Mode = .phase$mode)
   if (nzchar(failure)) message("FAILED ", job$config$Candidate, ": ", failure)
   list(config = job$config, seed = job$seed, daily = result, log = log)
@@ -187,16 +202,19 @@ phase_run <- function(state, configs, screening = data.frame()) {
   results <- phase_map(state, phase_jobs(configs, dates))
   tuning <- bind_rows(lapply(results, `[[`, "log"))
   write.csv(tuning, file.path(state$opt$out, paste0(state$opt$id, "_tuning_initial.csv")), row.names = FALSE, fileEncoding = "UTF-8")
-  frozen <- list(); all_daily <- list(); seeds_daily <- list()
-  for (model in unique(vapply(configs, `[[`, character(1), "Model"))) {
+  models <- unique(vapply(configs, `[[`, character(1), "Model"))
+  neural_models <- c("LSTM_Improved", "GRU", "NNAR")
+  finalists <- setNames(lapply(models, function(model) {
     candidates <- Filter(function(x) x$config$Model == model && !is.null(x$daily), results)
     if (!length(candidates)) stop("模型全部候选失败：", model, "；见 initial 调参日志。")
     candidates <- candidates[order(vapply(candidates, function(x) x$log$ValidationRMSE, numeric(1)))]
-    neural <- model %in% c("LSTM_Improved", "GRU", "NNAR")
-    finalist <- head(candidates, if (model %in% c("LSTM_Improved", "GRU")) 3L else 1L)
-    extras <- if (neural) phase_map(state, phase_jobs(lapply(finalist, `[[`, "config"), dates, c(2027L, 2028L), "SeedConfirmation")) else list()
-    tuning <- bind_rows(tuning, bind_rows(lapply(extras, `[[`, "log")))
-    ranked <- lapply(finalist, function(x) {
+    head(candidates, if (model %in% c("LSTM_Improved", "GRU")) 3L else 1L)
+  }), models)
+  # 所有模型的种子确认任务放进同一次并行映射，不按模型依次等待。
+  extras <- phase_map(state, unlist(lapply(intersect(models, neural_models), function(model)
+    phase_jobs(lapply(finalists[[model]], `[[`, "config"), dates, c(2027L, 2028L), "SeedConfirmation")), recursive = FALSE))
+  best <- setNames(lapply(models, function(model) {
+    ranked <- lapply(finalists[[model]], function(x) {
       members <- c(list(x), Filter(function(y) y$config$Candidate == x$config$Candidate, extras))
       if (any(vapply(members, function(y) is.null(y$daily), logical(1)))) return(NULL)
       prediction <- rowMeans(do.call(cbind, lapply(members, function(y) y$daily$Prediction)))
@@ -205,17 +223,29 @@ phase_run <- function(state, configs, screening = data.frame()) {
     })
     ranked <- Filter(Negate(is.null), ranked)
     if (!length(ranked)) stop("种子确认全部失败：", model)
-    best <- ranked[[which.min(vapply(ranked, `[[`, numeric(1), "selection"))]]
-    actual <- best$members[[1]]$daily$Actual
-    frozen[[model]] <- data.frame(Model = model, Candidate = best$config$Candidate, Transform = best$config$Transform,
-      Settings = phase_json(best$config), SelectionRMSE = best$selection, EnsembleValidationRMSE = sqrt(mean((actual - best$prediction)^2)),
+    ranked[[which.min(vapply(ranked, `[[`, numeric(1), "selection"))]]
+  }), models)
+  # 所有模型的 Test 与 September 冻结评估同样合并为一次并行映射；结果顺序与任务顺序一致。
+  periods <- if (state$opt$mode == "full") c("Test", "September") else character()
+  final_jobs <- unlist(lapply(models, function(model) unlist(lapply(periods, function(period)
+    phase_jobs(list(best[[model]]$config), phase_dates("full", period), if (model %in% neural_models) 2026:2028 else 2026L, "FrozenEvaluation", period)), recursive = FALSE)), recursive = FALSE)
+  final_all <- phase_map(state, final_jobs)
+  final_key <- vapply(final_jobs, function(job) paste(job$config$Model, job$period), character(1))
+  frozen <- list(); all_daily <- list(); seeds_daily <- list()
+  for (model in models) {
+    neural <- model %in% neural_models
+    chosen <- best[[model]]
+    tuning <- bind_rows(tuning, bind_rows(lapply(Filter(function(y) y$config$Model == model, extras), `[[`, "log")))
+    actual <- chosen$members[[1]]$daily$Actual
+    frozen[[model]] <- data.frame(Model = model, Candidate = chosen$config$Candidate, Transform = chosen$config$Transform,
+      Settings = phase_json(chosen$config), SelectionRMSE = chosen$selection, EnsembleValidationRMSE = sqrt(mean((actual - chosen$prediction)^2)),
       Seeds = if (neural) "2026,2027,2028" else "2026", IsFinal = state$opt$mode == "full", SelectionPeriod = if (state$opt$mode == "full") "2025 full year" else "SMOKE ONLY: 2025-01-01..14", Mode = state$opt$mode)
-    all_daily[[paste0(model, "Validation")]] <- data.frame(Date = dates, Period = "Validation", Model = model, Prediction = best$prediction, Actual = actual)
-    for (member in best$members) seeds_daily[[length(seeds_daily) + 1L]] <- cbind(Model = model, Period = "Validation", member$daily)
-    if (state$opt$mode == "full") for (period in c("Test", "September")) {
-      final <- phase_map(state, phase_jobs(list(best$config), phase_dates("full", period), if (neural) 2026:2028 else 2026L, "FrozenEvaluation", period))
+    all_daily[[paste0(model, "Validation")]] <- data.frame(Date = dates, Period = "Validation", Model = model, Prediction = chosen$prediction, Actual = actual)
+    for (member in chosen$members) seeds_daily[[length(seeds_daily) + 1L]] <- cbind(Model = model, Period = "Validation", member$daily)
+    for (period in periods) {
+      final <- final_all[final_key == paste(model, period)]
       tuning <- bind_rows(tuning, bind_rows(lapply(final, `[[`, "log")))
-      if (any(vapply(final, function(x) is.null(x$daily), logical(1)))) stop("冻结模型预测失败：", model, " / ", period)
+      if (!length(final) || any(vapply(final, function(x) is.null(x$daily), logical(1)))) stop("冻结模型预测失败：", model, " / ", period)
       all_daily[[paste0(model, period)]] <- data.frame(Date = final[[1]]$daily$Date, Period = period, Model = model,
         Prediction = rowMeans(do.call(cbind, lapply(final, function(x) x$daily$Prediction))), Actual = final[[1]]$daily$Actual)
       for (member in final) seeds_daily[[length(seeds_daily) + 1L]] <- cbind(Model = model, Period = period, member$daily)

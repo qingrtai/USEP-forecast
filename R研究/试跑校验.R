@@ -1,8 +1,10 @@
-# Rscript 试跑校验.R results/smoke_<run>；只读工作簿，不运行任何模型。
+# Rscript 试跑校验.R results/smoke_<run> [脚本编号…]；只读工作簿，不运行任何模型。
+# 不给编号时检查 05、06、07；只重跑了 07 时写 `试跑校验.R results/smoke_<run> 07`。
 suppressPackageStartupMessages({library(readxl); library(dplyr)})
-out <- commandArgs(trailingOnly = TRUE)[1]
-stopifnot(length(out) == 1L, dir.exists(out))
-for (id in c("05", "06", "07")) {
+args <- commandArgs(trailingOnly = TRUE)
+out <- args[1]
+stopifnot(length(args) >= 1L, dir.exists(out), all(args[-1] %in% c("05", "06", "07")))
+for (id in if (length(args) > 1L) args[-1] else c("05", "06", "07")) {
   file <- file.path(out, paste0("扩充_", id, ".xlsx"))
   stopifnot(file.exists(file))
   d <- as.data.frame(read_excel(file, sheet = "Daily"))
