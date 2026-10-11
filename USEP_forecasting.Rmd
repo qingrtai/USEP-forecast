@@ -1,0 +1,1185 @@
+---
+title: "Forecasting Singapore's Daily USEP"
+subtitle: "AE6202 Group Project: data processing, models and evaluation"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+params:
+  run_models: false
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4, dpi = 120)
+```
+
+**How to run.** The eight raw Excel files are in `data/` and are never modified. All exported tables and figures go to `output/`.
+
+- `run_models: false` (default): sections 1, 2 and 5–8 run in a few minutes. The model forecasts of the full run (sections 3–4) are loaded from `output/model_runs.rds` and `output/model_forecasts.xlsx`.
+- `run_models: true`: re-tunes and re-runs every model (several hours; needs `xgboost` and `keras3` with a TensorFlow backend) and overwrites those two files.
+
+The saved full run used R 4.6.1, TensorFlow 2.21.0 and Keras 3.15.1.
+
+```{r packages}
+# TRUE only when knitting with params = list(run_models = TRUE)
+run_models <- if (exists("params")) isTRUE(params$run_models) else FALSE
+
+library(readxl)    # read the raw Excel files
+library(writexl)   # export tables to Excel
+library(fpp3)      # tsibble, feasts, ggplot2, dplyr, tidyr
+library(forecast)  # ets(), Arima(), tslm(), checkresiduals(), dm.test(); loaded after fpp3 so forecast() is forecast::forecast
+library(tseries)   # adf.test(), kpss.test()
+library(knitr)     # kable()
+if (run_models) {
+  library(xgboost) # gradient-boosted trees
+  library(keras3)  # LSTM; first-time setup: keras3::install_keras(backend = "tensorflow")
+}
+
+set.seed(2026)
+data_dir   <- "data"
+output_dir <- "output"
+fig_dir    <- file.path(output_dir, "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Save a figure to output/figures and return it so it is also shown in the document
+save_fig <- function(p, file, width = 8, height = 4) {
+  png(file.path(fig_dir, file), width = width, height = height, units = "in", res = 300)
+  print(p)
+  dev.off()
+  p
+}
+```
+
+# Data processing
+
+## Sample design
+
+```{r sample-dates}
+start_date     <- as.Date("2021-01-01")  # first day of the study sample
+end_date       <- as.Date("2026-08-31")  # last day with temperature data
+train_end      <- as.Date("2024-12-31")  # training: 2021-2024
+validation_end <- as.Date("2025-12-31")  # validation: 2025; test: 1 Jan - 31 Aug 2026
+refit_days     <- 7L                     # model parameters are re-estimated every 7 days
+```
+
+## Market data: half-hourly to daily
+
+Each EMC file has 48 half-hourly trading periods per day. The daily value is the mean of the 48 periods. The code stops if a day has a duplicate, a missing value or fewer than 48 periods. Negative prices and spikes are kept.
+
+```{r market-data}
+read_market <- function(file, value_column, variable) {
+  raw <- as.data.frame(read_excel(file.path(data_dir, file), sheet = "Raw", .name_repair = "minimal"))
+  # keep only the data columns; the source notes to the right are not variables
+  raw <- data.frame(Date   = as.Date(raw[["DATE"]]),
+                    Period = as.integer(raw[["PERIOD"]]),
+                    Value  = as.numeric(raw[[value_column]]))
+  raw <- raw[order(raw$Date, raw$Period), ]
+  stopifnot(!anyDuplicated(raw[c("Date", "Period")]), all(raw$Period %in% 1:48), !anyNA(raw))
+  daily <- raw |> group_by(Date) |> summarise(N = n(), Value = mean(Value), .groups = "drop")
+  stopifnot(all(daily$N == 48L))  # complete days only
+  daily$N <- NULL
+  names(daily)[2] <- variable
+  as.data.frame(daily)
+}
+
+usep        <- read_market("USEP.xlsx", "USEP ($/MWh)", "DailyUSEP")
+demand      <- read_market("NEM_Demand_Forecast.xlsx", "DEMAND (MW)", "DemandMean")  # forecast demand, not actual
+primary     <- read_market("Primary_Reserve_Price.xlsx", "PRICE ($/MWh)", "PrimaryReserve")
+contingency <- read_market("Contingency_Reserve_Price.xlsx", "PRICE ($/MWh)", "ContingencyReserve")
+regulation  <- read_market("Regulation_Price.xlsx", "PRICE ($/MWh)", "Regulation")
+```
+
+## Fuel price: Brent in SGD
+
+`BrentSGD` = Brent spot price (USD/barrel) × MAS SGD per USD. Both are trading-day series, so the latest available quote is carried forward over weekends and holidays; a future quote is never used.
+
+```{r fuel}
+# Brent is stored newest-first in the source file
+brent_raw <- read_excel(file.path(data_dir, "BrentUSD.xlsx"), sheet = "Raw", .name_repair = "minimal")
+brent <- data.frame(Date = as.Date(brent_raw[[1]]), BrentUSD = as.numeric(brent_raw[[2]]))
+brent <- brent[order(brent$Date), ]
+stopifnot(!anyDuplicated(brent$Date), !anyNA(brent))
+
+# MAS file: year and month appear only on the first row of each group, so fill them down;
+# the notes at the bottom are dropped because they have no valid day or rate
+fx_raw <- read_excel(file.path(data_dir, "USD_SGD.xlsx"), sheet = "Raw", col_types = "text", .name_repair = "minimal")
+fx <- data.frame(Year = fx_raw[[1]], Month = fx_raw[[2]], Day = fx_raw[[3]], USD_SGD = fx_raw[[4]])
+fx[fx == ""] <- NA_character_
+fx <- fx |> fill(Year, Month, .direction = "down")
+fx$Day     <- suppressWarnings(as.integer(fx$Day))
+fx$USD_SGD <- suppressWarnings(as.numeric(fx$USD_SGD))
+fx <- fx[!is.na(fx$Day) & !is.na(fx$USD_SGD), ]
+fx$Month <- match(fx$Month, month.abb)
+fx$Date  <- as.Date(sprintf("%s-%02d-%02d", fx$Year, fx$Month, fx$Day))
+fx <- fx[order(fx$Date), c("Date", "USD_SGD")]
+stopifnot(!anyDuplicated(fx$Date), !anyNA(fx))
+
+# The calendar starts before 2021 so that 1-3 Jan 2021 use the 31 Dec 2020 rate
+fuel <- data.frame(Date = seq(min(min(brent$Date), min(fx$Date)), end_date + 1L, by = "day"))
+brent$BrentSourceDate <- brent$Date
+fx$FXSourceDate       <- fx$Date
+fuel <- fuel |>
+  left_join(brent, by = "Date") |>
+  left_join(fx, by = "Date") |>
+  fill(BrentUSD, USD_SGD, BrentSourceDate, FXSourceDate, .direction = "down")
+fuel$BrentSGD <- fuel$BrentUSD * fuel$USD_SGD
+fuel <- fuel[fuel$Date >= start_date, ]
+stopifnot(all(fuel$BrentSourceDate <= fuel$Date), all(fuel$FXSourceDate <= fuel$Date),
+          all(fuel$USD_SGD[fuel$Date <= as.Date("2021-01-03")] == 1.3221))
+```
+
+## Temperature
+
+Five fixed MSS stations. The raw five-station mean is computed only when all five report; gaps are rebuilt below.
+
+```{r temperature}
+stations <- c("Changi", "Jurong_West", "Ang_Mo_Kio", "Admiralty", "Sentosa_Island")
+temp <- as.data.frame(read_excel(file.path(data_dir, "TempSG.xlsx"), sheet = "TempSG_Five_Stations", .name_repair = "minimal"))
+temp <- temp[c("Date", stations)]
+temp$Date <- as.Date(temp$Date)
+temp$N_stations_available <- rowSums(!is.na(temp[stations]))
+temp$TempSG_raw <- rowMeans(temp[stations], na.rm = FALSE)
+stopifnot(!anyDuplicated(temp$Date), !anyNA(temp$Changi))  # Changi has no gaps
+```
+
+## Calendar variables and the daily table
+
+```{r calendar}
+# Public holidays incl. official in-lieu days and polling days; revised 2022 and 2023 dates.
+# Sources: https://www.mom.gov.sg/employment-practices/public-holidays
+# https://www.mom.gov.sg/newsroom/press-releases/2021/1021-revised-dates-for-hari-raya-puasa-and--hari-raya-haji-public-holidays-in-2022
+# https://www.mom.gov.sg/newsroom/press-releases/2022/0929-revised-date-for-vesak-day-2023
+holidays_2021 <- paste0("2021-", c("01-01", "02-12", "02-13", "04-02", "05-01", "05-13", "05-26", "07-20", "08-09", "11-04", "12-25"))
+holidays_2022 <- paste0("2022-", c("01-01", "02-01", "02-02", "04-15", "05-01", "05-02", "05-03", "05-15", "05-16", "07-10", "07-11", "08-09", "10-24", "12-25", "12-26"))
+holidays_2023 <- paste0("2023-", c("01-01", "01-02", "01-22", "01-23", "01-24", "04-07", "04-22", "05-01", "06-02", "06-29", "08-09", "09-01", "11-12", "11-13", "12-25"))
+holidays_2024 <- paste0("2024-", c("01-01", "02-10", "02-11", "02-12", "03-29", "04-10", "05-01", "05-22", "06-17", "08-09", "10-31", "12-25"))
+holidays_2025 <- paste0("2025-", c("01-01", "01-29", "01-30", "03-31", "04-18", "05-01", "05-03", "05-12", "06-07", "08-09", "10-20", "12-25"))
+holidays_2026 <- paste0("2026-", c("01-01", "02-17", "02-18", "03-21", "04-03", "05-01", "05-27", "05-31", "06-01", "08-09", "08-10", "11-08", "11-09", "12-25"))
+holiday_dates <- as.Date(c(holidays_2021, holidays_2022, holidays_2023, holidays_2024, holidays_2025, holidays_2026))
+
+# One extra row (2026-09-01) is used only for the final next-day forecast; it is never scored
+daily <- data.frame(Date = seq(start_date, end_date + 1L, by = "day"))
+daily <- daily |>
+  left_join(usep, by = "Date") |> left_join(demand, by = "Date") |>
+  left_join(primary, by = "Date") |> left_join(contingency, by = "Date") |>
+  left_join(regulation, by = "Date") |> left_join(fuel, by = "Date") |>
+  left_join(temp, by = "Date")
+daily$DayOfWeek     <- (as.POSIXlt(daily$Date)$wday + 6L) %% 7L  # 0 = Monday, ..., 6 = Sunday
+daily$Weekend       <- as.integer(daily$DayOfWeek >= 5L)
+daily$PublicHoliday <- as.integer(daily$Date %in% holiday_dates)
+# Friday is the base day: Saturday = Weekend + Saturday, Sunday = Weekend (avoids a dummy trap)
+daily$Monday    <- as.integer(daily$DayOfWeek == 0L)
+daily$Tuesday   <- as.integer(daily$DayOfWeek == 1L)
+daily$Wednesday <- as.integer(daily$DayOfWeek == 2L)
+daily$Thursday  <- as.integer(daily$DayOfWeek == 3L)
+daily$Saturday  <- as.integer(daily$DayOfWeek == 5L)
+daily$TPCRegime <- as.integer(daily$Date >= as.Date("2023-07-01"))  # temporary price cap in force
+daily$Sample <- ifelse(daily$Date <= train_end, "Train",
+                ifelse(daily$Date <= validation_end, "Validation",
+                ifelse(daily$Date <= end_date, "Test", "Forecast")))
+stopifnot(all(diff(daily$Date) == 1L), !anyNA(daily$DailyUSEP[daily$Date <= end_date]))
+```
+
+## Temperature gaps: ridge reconstruction
+
+Changi is complete; the other four stations have gaps of up to 36 days. Each missing value is rebuilt from the station's difference to Changi, predicted by a ridge regression on the other stations' differences and month seasonality. Observed temperatures are never replaced. The penalty λ is chosen inside 2021–2024 only: fit up to three cut-offs, mask the next 7 or 36 days, and compare RMSE.
+
+```{r temperature-ridge}
+# Inputs: other stations minus Changi, plus month sine/cosine; missing inputs -> training medians
+ridge_inputs <- function(dat, target, medians = NULL) {
+  others <- setdiff(stations, c("Changi", target))
+  x <- as.matrix(dat[others]) - dat$Changi
+  month <- as.integer(format(dat$Date, "%m"))
+  x <- cbind(x, MonthSin = sin(2 * pi * month / 12), MonthCos = cos(2 * pi * month / 12))
+  if (is.null(medians)) medians <- apply(x, 2, median, na.rm = TRUE)
+  for (j in seq_len(ncol(x))) x[is.na(x[, j]), j] <- medians[j]
+  list(x = x, medians = medians)
+}
+
+# Closed-form ridge on standardised inputs; the intercept is not penalised
+fit_station <- function(dat, target, lambda) {
+  observed <- dat[!is.na(dat[[target]]) & !is.na(dat$Changi), ]
+  stopifnot(nrow(observed) >= 180L)
+  input  <- ridge_inputs(observed, target)
+  center <- colMeans(input$x)
+  scale  <- apply(input$x, 2, sd)
+  scale[scale == 0] <- 1
+  x <- cbind(Intercept = 1, sweep(sweep(input$x, 2, center, "-"), 2, scale, "/"))
+  y <- observed[[target]] - observed$Changi
+  penalty <- diag(c(0, rep(lambda, ncol(x) - 1L)))
+  coef <- solve(crossprod(x) + penalty, crossprod(x, y))
+  list(target = target, medians = input$medians, center = center, scale = scale, coef = coef)
+}
+
+predict_station <- function(model, dat) {
+  input <- ridge_inputs(dat, model$target, model$medians)
+  x <- cbind(Intercept = 1, sweep(sweep(input$x, 2, model$center, "-"), 2, model$scale, "/"))
+  as.numeric(x %*% model$coef) + dat$Changi
+}
+
+# Choose lambda per station by masked-block validation within the training period
+temperature_cv <- data.frame()
+temperature_lambda <- setNames(numeric(4L), stations[-1])
+for (station in stations[-1]) {
+  for (lambda in c(0.1, 1, 10)) {
+    errors <- numeric()
+    for (cutoff in as.Date(c("2021-12-31", "2022-12-31", "2023-12-31"))) {
+      cutoff <- as.Date(cutoff, origin = "1970-01-01")
+      model <- fit_station(temp[temp$Date <= cutoff, ], station, lambda)
+      for (block in c(7L, 36L)) {
+        validation <- temp[temp$Date > cutoff & temp$Date <= cutoff + block & !is.na(temp[[station]]), ]
+        masked <- validation
+        masked[[station]] <- NA_real_
+        errors <- c(errors, predict_station(model, masked) - validation[[station]])
+      }
+    }
+    temperature_cv <- rbind(temperature_cv, data.frame(Station = station, Lambda = lambda, N = length(errors),
+                                                       MAE = mean(abs(errors)), RMSE = sqrt(mean(errors^2))))
+  }
+  candidate <- temperature_cv[temperature_cv$Station == station, ]
+  temperature_lambda[station] <- candidate$Lambda[which.min(candidate$RMSE)]
+}
+temperature_lambda
+```
+
+## Model features
+
+All inputs are known before the target day: price lags and 7-day moving statistics, and the previous day's demand forecast, reserve and regulation prices, fuel price and temperature. Calendar dummies refer to the target day. `prepare_features()` is re-run at each weekly re-estimation so that temperature gaps are filled with models fitted on past data only.
+
+```{r features}
+prepare_features <- function(cutoff, through = cutoff + refit_days) {
+  dat <- daily[daily$Date <= through, ]
+  # refit the station models on data up to the cut-off; fill missing cells only
+  for (station in stations[-1]) {
+    model <- fit_station(dat[dat$Date <= cutoff, ], station, temperature_lambda[station])
+    missing <- which(is.na(dat[[station]]) & !is.na(dat$Changi))
+    dat[missing, station] <- predict_station(model, dat[missing, ])
+  }
+  dat$TempSG_model <- rowMeans(dat[stations], na.rm = FALSE)
+  dat$TempSG_reconstructed <- dat$N_stations_available < 5L
+  # price history
+  dat$USEP_lag1 <- lag(dat$DailyUSEP, 1L)
+  dat$USEP_lag2 <- lag(dat$DailyUSEP, 2L)
+  dat$USEP_lag7 <- lag(dat$DailyUSEP, 7L)
+  dat$USEP_MA7 <- vapply(seq_len(nrow(dat)), function(i) if (i > 7L) mean(dat$DailyUSEP[(i - 7L):(i - 1L)]) else NA_real_, numeric(1))
+  dat$USEP_SD7 <- vapply(seq_len(nrow(dat)), function(i) if (i > 7L) sd(dat$DailyUSEP[(i - 7L):(i - 1L)]) else NA_real_, numeric(1))
+  # external variables, all lagged one day
+  dat$DemandMean_lag1         <- lag(dat$DemandMean, 1L)
+  dat$PrimaryReserve_lag1     <- lag(dat$PrimaryReserve, 1L)
+  dat$PrimaryReserveLog_lag1  <- log1p(dat$PrimaryReserve_lag1)  # used only in the ancillary robustness check
+  dat$ContingencyReserve_lag1 <- lag(dat$ContingencyReserve, 1L)
+  dat$Regulation_lag1         <- lag(dat$Regulation, 1L)
+  dat$BrentSGD_lag1           <- lag(dat$BrentSGD, 1L)
+  dat$TempSG_model_lag1       <- lag(dat$TempSG_model, 1L)
+  dat
+}
+
+price_features    <- c("USEP_lag1", "USEP_lag2", "USEP_lag7", "USEP_MA7", "USEP_SD7")
+external_features <- c("DemandMean_lag1", "PrimaryReserve_lag1", "ContingencyReserve_lag1", "Regulation_lag1",
+                       "BrentSGD_lag1", "TempSG_model_lag1", "Monday", "Tuesday", "Wednesday", "Thursday",
+                       "Saturday", "Weekend", "PublicHoliday")
+all_features <- c(price_features, external_features)
+warmup_date  <- start_date + 28L  # 28-day warm-up shared by the feature-based models
+initial_data <- prepare_features(train_end, train_end)
+```
+
+## Descriptive statistics
+
+```{r descriptive}
+usep_sample <- daily[daily$Date <= end_date, ]
+annual <- usep_sample |>
+  group_by(Year = as.integer(format(Date, "%Y"))) |>
+  summarise(N = n(), Mean = mean(DailyUSEP), SD = sd(DailyUSEP), Min = min(DailyUSEP),
+            Median = median(DailyUSEP), P95 = quantile(DailyUSEP, 0.95), Max = max(DailyUSEP))
+kable(annual, digits = 2, caption = "Table 3. Daily USEP by year (SGD/MWh)")
+
+train_y  <- daily$DailyUSEP[daily$Date <= train_end]  # training series, 2021-2024
+train_ts <- ts(train_y, frequency = 7)                # weekly seasonality
+spike_threshold <- as.numeric(quantile(train_y, 0.95, type = 7))  # spike day: above the training 95th percentile
+
+# Sample skewness (same definition as Excel SKEW)
+skew <- function(x) {
+  n <- length(x)
+  n / ((n - 1) * (n - 2)) * sum(((x - mean(x)) / sd(x))^3)
+}
+round(c(MinPrice = min(usep_sample$DailyUSEP), SpikeThreshold = spike_threshold,
+        Skew_level = skew(train_y), Skew_log = skew(log(train_y))), 2)
+```
+
+```{r fig1, fig.height = 3.6}
+usep_ts <- as_tsibble(usep_sample[c("Date", "DailyUSEP")], index = Date)
+p1 <- usep_ts |>
+  autoplot(DailyUSEP) +
+  geom_hline(yintercept = spike_threshold, linetype = "dashed", colour = "#F8766D") +
+  geom_vline(xintercept = as.Date(c("2025-01-01", "2026-01-01")), linetype = "dashed", colour = "grey50") +
+  labs(title = "Daily average USEP, Jan 2021 - Aug 2026",
+       subtitle = "Dashed lines: training-period 95th percentile and validation/test start dates",
+       y = "USEP (SGD/MWh)")
+save_fig(p1, "fig1_usep.png", 8, 3.6)
+```
+
+```{r fig2, fig.height = 5}
+p2 <- usep_ts |>
+  filter(Date <= train_end) |>
+  gg_tsdisplay(DailyUSEP, plot_type = "partial", lag_max = 28) +
+  labs(title = "Training-period daily USEP (2021-2024)")
+save_fig(p2, "fig2_acf_pacf.png", 8, 5)
+```
+
+## Stationarity tests
+
+ADF: H₀ = unit root. KPSS: H₀ = level-stationary. Using both tells us whether differencing is needed (`tseries` p-values are interpolated, so they are bounded at 0.01 and 0.10).
+
+```{r stationarity}
+unit_root <- function(x, series) {
+  adf  <- adf.test(x)
+  kpss <- kpss.test(x)
+  data.frame(Series = series, ADF = unname(adf$statistic), ADF_p = adf$p.value,
+             KPSS = unname(kpss$statistic), KPSS_p = kpss$p.value)
+}
+stationarity <- rbind(unit_root(train_ts, "Level"),
+                      unit_root(log(train_ts), "Log"),
+                      unit_root(diff(train_ts), "First difference"),
+                      unit_root(diff(train_ts, lag = 7), "Seasonal difference (lag 7)"))
+kable(stationarity, digits = 3, caption = "Table 5. Stationarity tests on training-period daily USEP")
+```
+
+# Forecasting framework
+
+Every model makes one-day-ahead forecasts on the same dates. Parameters are re-estimated every 7 days on an expanding window; within the week only the inputs (and the ETS/ARIMA states) are updated. Settings are chosen on 2025 (validation) and frozen before 2026 (test).
+
+## Evaluation metrics
+
+```{r metrics}
+validation_dates <- daily$Date[daily$Sample == "Validation"]
+test_dates       <- daily$Date[daily$Sample == "Test"]
+# MASE scale: MAE of the seasonal naive (same weekday last week) over 2021-2024, fixed for all models
+mase_scale <- mean(abs(train_y[8:length(train_y)] - train_y[1:(length(train_y) - 7L)]))
+
+score <- function(actual, predicted) {
+  error <- predicted - actual
+  denominator <- abs(actual) + abs(predicted)
+  smape <- ifelse(denominator == 0, 0, 200 * abs(error) / denominator)
+  data.frame(N = length(error), RMSE = sqrt(mean(error^2)), MAE = mean(abs(error)),
+             MASE = mean(abs(error)) / mase_scale, sMAPE = mean(smape))
+}
+```
+
+## Feature sets M0–M4
+
+External variables are added in blocks: M0 price history → M1 + demand → M2 + reserve and regulation prices → M3 + fuel → M4 + temperature and calendar. M4 is the full model. Dynamic regression drops the explicit 1-, 2- and 7-day lags because its ARIMA errors model them.
+
+```{r feature-sets}
+# Ancillary-price block of M2: the original three prices, or one of the four robustness variants
+# (see "Ancillary-price robustness" under Model evaluation)
+ancillary_features <- function(ancillary) switch(ancillary,
+  original  = c("PrimaryReserve_lag1", "ContingencyReserve_lag1", "Regulation_lag1"),
+  log_cont  = c("PrimaryReserveLog_lag1", "ContingencyReserve_lag1"),
+  log_reg   = c("PrimaryReserveLog_lag1", "Regulation_lag1"),
+  drop_cont = "ContingencyReserve_lag1",
+  drop_reg  = "Regulation_lag1")
+
+feature_names <- function(kind, step = 4L, tpc = FALSE, ancillary = "original") {
+  features <- if (kind == "DynamicRegression") c("USEP_MA7", "USEP_SD7") else price_features
+  if (step >= 1L) features <- c(features, "DemandMean_lag1")
+  if (step >= 2L) features <- c(features, ancillary_features(ancillary))
+  if (step >= 3L) features <- c(features, "BrentSGD_lag1")
+  if (step >= 4L) features <- c(features, "TempSG_model_lag1", "Monday", "Tuesday", "Wednesday", "Thursday",
+                                "Saturday", "Weekend", "PublicHoliday")
+  if (tpc) features <- c(features, "TPCRegime")
+  features
+}
+```
+
+## Model functions
+
+Missing inputs are filled with medians of the current training window; the LSTM also standardises inputs and target with training-window means and SDs. XGBoost and LSTM choose the number of rounds/epochs by early stopping on the last 28 training days, then refit on the whole training window.
+
+```{r model-functions}
+fit_scaler <- function(x) {
+  medians <- apply(x, 2, median, na.rm = TRUE)
+  for (j in seq_len(ncol(x))) x[is.na(x[, j]), j] <- medians[j]
+  center <- colMeans(x)
+  scale  <- apply(x, 2, sd)
+  scale[scale == 0] <- 1
+  list(medians = medians, center = center, scale = scale)
+}
+
+transform_x <- function(x, scaler, standardize = FALSE) {
+  for (j in seq_len(ncol(x))) x[is.na(x[, j]), j] <- scaler$medians[j]
+  if (standardize) x <- sweep(sweep(x, 2, scaler$center, "-"), 2, scaler$scale, "/")
+  x
+}
+
+# LSTM input: for each target row, the preceding `length` rows of features
+make_sequences <- function(x, index, length) {
+  sequences <- array(0, dim = c(length(index), length, ncol(x)))
+  for (j in seq_along(index)) sequences[j, , ] <- x[(index[j] - length + 1L):index[j], , drop = FALSE]
+  sequences
+}
+
+# One LSTM layer -> dropout -> linear output, trained on MSE with Adam
+new_lstm <- function(config, n_features, seed) {
+  clear_session()
+  set_random_seed(seed)
+  model <- keras_model_sequential(input_shape = c(config$sequence, n_features))
+  model <- layer_lstm(model, units = config$units)
+  model <- layer_dropout(model, rate = config$dropout)
+  model <- layer_dense(model, units = 1L)
+  compile(model, optimizer = optimizer_adam(learning_rate = config$learning_rate), loss = "mse")
+  model
+}
+
+fit_xgb <- function(x, y, config, seed) {
+  set.seed(seed)
+  params <- c(list(objective = "reg:squarederror", eval_metric = "rmse", nthread = 1L, seed = seed), config)
+  n <- nrow(x)
+  inner   <- seq_len(n - 28L)
+  holdout <- (n - 27L):n
+  early <- xgb.train(params = params, data = xgb.DMatrix(x[inner, , drop = FALSE], label = y[inner]),
+                     nrounds = 600L, evals = list(validation = xgb.DMatrix(x[holdout, , drop = FALSE], label = y[holdout])),
+                     early_stopping_rounds = 20L, verbose = 0L)
+  rounds <- which.min(as.numeric(attr(early, "evaluation_log")[[2]]))
+  xgb.train(params = params, data = xgb.DMatrix(x, label = y), nrounds = rounds, verbose = 0L)
+}
+
+fit_lstm <- function(x, y, index, config, seed) {
+  # 1) early stopping on the last 28 training days
+  inner_index   <- head(index, -28L)
+  holdout_index <- tail(index, 28L)
+  inner_scaler <- fit_scaler(x[seq_len(max(inner_index)), , drop = FALSE])
+  inner_x      <- transform_x(x, inner_scaler, TRUE)
+  inner_y_mean <- mean(y[inner_index])
+  inner_y_sd   <- sd(y[inner_index])
+  early <- new_lstm(config, ncol(x), seed)
+  history <- fit(early, make_sequences(inner_x, inner_index, config$sequence), (y[inner_index] - inner_y_mean) / inner_y_sd,
+                 validation_data = list(make_sequences(inner_x, holdout_index, config$sequence), (y[holdout_index] - inner_y_mean) / inner_y_sd),
+                 epochs = 100L, batch_size = 32L, shuffle = FALSE,
+                 callbacks = list(callback_early_stopping(monitor = "val_loss", patience = 10L)), verbose = 0L)
+  epochs <- which.min(history$metrics$val_loss)
+  # 2) refit on the full training window with the chosen number of epochs
+  scaler   <- fit_scaler(x[seq_len(max(index)), , drop = FALSE])
+  scaled_x <- transform_x(x, scaler, TRUE)
+  y_mean <- mean(y[index])
+  y_sd   <- sd(y[index])
+  model <- new_lstm(config, ncol(x), seed)
+  fit(model, make_sequences(scaled_x, index, config$sequence), (y[index] - y_mean) / y_sd,
+      epochs = epochs, batch_size = 32L, shuffle = FALSE, verbose = 0L)
+  list(model = model, scaler = scaler, y_mean = y_mean, y_sd = y_sd)
+}
+```
+
+## Rolling one-day-ahead forecasts
+
+`rolling_predict()` is the single forecasting engine used for validation, test, M0–M4 and the next-day forecast.
+
+```{r rolling-predict}
+rolling_predict <- function(kind, config, dates, step = 4L, tpc = FALSE, seed = 2026L, ancillary = "original") {
+  prediction <- numeric(length(dates))
+  features <- feature_names(kind, step, tpc, ancillary)
+  for (j in seq_along(dates)) {
+    date <- dates[j]
+    # --- every 7th day: rebuild features with data up to yesterday and re-estimate ---
+    if ((j - 1L) %% refit_days == 0L) {
+      cutoff <- date - 1L
+      dat <- prepare_features(cutoff, min(max(dates), cutoff + refit_days))
+      train_index   <- which(dat$Date <= cutoff & dat$Date >= warmup_date)
+      history_index <- which(dat$Date <= cutoff)
+      y <- dat$DailyUSEP
+      if (kind %in% c("TSLM", "DynamicRegression", "XGBoost", "LSTM")) {
+        x <- as.matrix(dat[features])
+        scaler  <- fit_scaler(x[train_index, , drop = FALSE])
+        plain_x <- transform_x(x, scaler)
+      }
+      # ETS / SARIMA / dynamic regression keep the specification chosen by ets() / auto.arima() and re-estimate its parameters
+      if (kind == "ETS") model <- ets(ts(y[history_index], frequency = 7), model = config$model, damped = config$damped)
+      if (kind == "SARIMA") model <- Arima(ts(y[history_index], frequency = 7), order = config$order,
+                                           seasonal = config$seasonal, include.constant = config$constant)
+      if (kind == "TSLM") model <- tslm(reformulate(features, response = "DailyUSEP"),
+                                        data = ts(data.frame(DailyUSEP = y[train_index], plain_x[train_index, , drop = FALSE]), frequency = 7))
+      if (kind == "DynamicRegression") model <- Arima(ts(y[train_index], frequency = 7), xreg = plain_x[train_index, , drop = FALSE],
+                                                      order = config$order, seasonal = config$seasonal,
+                                                      include.constant = config$constant)
+      if (kind == "XGBoost") model <- fit_xgb(plain_x[train_index, , drop = FALSE], y[train_index], config, seed)
+      if (kind == "LSTM") {
+        model <- fit_lstm(x, y, train_index, config, seed)
+        message(paste("LSTM trained to", cutoff, "seed", seed))
+      }
+    }
+    # --- every day: forecast today with the current parameters and all data up to yesterday ---
+    current <- match(date, dat$Date)
+    if (kind == "SeasonalNaive") prediction[j] <- as.numeric(snaive(ts(dat$DailyUSEP[seq_len(current - 1L)], frequency = 7), h = 1L)$mean)
+    if (kind == "ETS") prediction[j] <- as.numeric(forecast(ets(ts(dat$DailyUSEP[seq_len(current - 1L)], frequency = 7),
+                                                                model = model, use.initial.values = TRUE), h = 1L)$mean)
+    if (kind == "SARIMA") prediction[j] <- as.numeric(forecast(Arima(ts(dat$DailyUSEP[seq_len(current - 1L)], frequency = 7),
+                                                                     model = model), h = 1L)$mean)
+    if (kind == "TSLM") prediction[j] <- as.numeric(forecast(model, newdata = as.data.frame(plain_x[current, , drop = FALSE]))$mean)
+    if (kind == "DynamicRegression") {
+      past <- which(dat$Date < date & dat$Date >= warmup_date)
+      updated <- Arima(ts(dat$DailyUSEP[past], frequency = 7), xreg = plain_x[past, , drop = FALSE], model = model)
+      prediction[j] <- as.numeric(forecast(updated, xreg = plain_x[current, , drop = FALSE], h = 1L)$mean)
+    }
+    if (kind == "XGBoost") prediction[j] <- as.numeric(predict(model, xgb.DMatrix(plain_x[current, , drop = FALSE])))
+    if (kind == "LSTM") {
+      scaled_x <- transform_x(x, model$scaler, TRUE)
+      prediction[j] <- as.numeric(predict(model$model, make_sequences(scaled_x, current, config$sequence), verbose = 0L)) *
+        model$y_sd + model$y_mean
+    }
+  }
+  stopifnot(all(is.finite(prediction)))
+  prediction
+}
+```
+
+## Candidate settings
+
+ETS, SARIMA and dynamic regression follow the course workflow: `ets()` and `auto.arima()` choose the specification on the training period (AICc; `auto.arima()` picks d and D by unit-root tests), and that specification is frozen.
+
+```{r candidates}
+# SARIMA: auto.arima() on 2021-2024; dynamic regression: auto.arima() with the feature set as xreg
+arima_candidates <- function(kind, step = 4L, tpc = FALSE, ancillary = "original") {
+  if (kind == "SARIMA") {
+    fit <- auto.arima(train_ts)
+  } else {
+    train <- initial_data[initial_data$Date >= warmup_date, ]
+    x <- as.matrix(train[feature_names(kind, step, tpc, ancillary)])
+    fit <- auto.arima(ts(train$DailyUSEP, frequency = 7), xreg = transform_x(x, fit_scaler(x)))
+  }
+  # arma = (p, q, P, Q, period, d, D)
+  list(list(order    = as.integer(fit$arma[c(1, 6, 2)]),
+            seasonal = as.integer(fit$arma[c(3, 7, 4)]),
+            constant = any(c("intercept", "drift") %in% names(coef(fit)))))
+}
+
+# ETS: ets() chooses error, trend and seasonal components by AICc on 2021-2024
+ets_candidates <- function() {
+  fit <- ets(train_ts)
+  list(list(model = paste(fit$components[1:3], collapse = ""), damped = as.logical(fit$components[4])))
+}
+
+# XGBoost and LSTM: 12 random draws from each grid (seed fixed, order of sampling matters)
+set.seed(2026)
+xgb_grid <- expand.grid(max_depth = c(2L, 3L, 4L), eta = c(0.03, 0.1), min_child_weight = c(1, 5),
+                        subsample = c(0.8, 1), colsample_bytree = c(0.8, 1), lambda = c(1, 5))
+xgb_grid <- xgb_grid[sample(nrow(xgb_grid), 12L), ]
+xgb_candidates <- lapply(seq_len(nrow(xgb_grid)), function(i) as.list(xgb_grid[i, ]))
+lstm_grid <- expand.grid(sequence = c(7L, 14L, 28L), units = c(16L, 32L), dropout = c(0.1, 0.2), learning_rate = c(0.001, 0.0005))
+lstm_grid <- lstm_grid[sample(nrow(lstm_grid), 12L), ]
+lstm_candidates <- lapply(seq_len(nrow(lstm_grid)), function(i) as.list(lstm_grid[i, ]))
+
+get_candidates <- function(kind, step = 4L, tpc = FALSE, ancillary = "original") {
+  if (kind == "ETS") return(ets_candidates())
+  if (kind %in% c("SARIMA", "DynamicRegression")) return(arima_candidates(kind, step, tpc, ancillary))
+  if (kind == "TSLM") return(list(list()))
+  if (kind == "XGBoost") return(xgb_candidates)
+  if (kind == "LSTM") return(lstm_candidates)
+}
+```
+
+# Validation: tuning on 2025
+
+*Runs only when `run_models = TRUE`.* Each candidate is forecast over the whole of 2025; the lowest validation RMSE wins (ETS, SARIMA and dynamic regression have a single candidate, chosen by `ets()` / `auto.arima()`). `TPCRegime` is kept only if it lowers the full-year RMSE by at least 1 % and improves at least three quarters. The LSTM's final forecast averages three random seeds. The recommended model is the one with the lowest validation RMSE, preferring the simpler structure when within 1 % of the best.
+
+```{r tuning}
+if (run_models) {
+  validation_actual <- daily$DailyUSEP[match(validation_dates, daily$Date)]
+  validation_log <- data.frame()
+  tpc_log <- data.frame()
+
+  # Forecast 2025 with every candidate; a failed candidate is logged, never silently skipped
+  tune <- function(kind, candidates, step = 4L, tpc = FALSE) {
+    predictions <- vector("list", length(candidates))
+    rmse <- rep(Inf, length(candidates))
+    for (i in seq_along(candidates)) {
+      message(paste("Validation", kind, "M", step, "TPC", tpc, "candidate", i))
+      started <- proc.time()[["elapsed"]]
+      failure <- ""
+      record_failure <- function(e) {
+        failure <<- conditionMessage(e)
+        NULL
+      }
+      predictions[i] <- list(tryCatch(rolling_predict(kind, candidates[[i]], validation_dates, step, tpc), error = record_failure))
+      if (!is.null(predictions[[i]])) rmse[i] <- sqrt(mean((predictions[[i]] - validation_actual)^2))
+      validation_log <<- rbind(validation_log, data.frame(Model = kind, Step = step, TPC = tpc, Candidate = i, RMSE = rmse[i],
+                                                          Seconds = proc.time()[["elapsed"]] - started, Failure = failure))
+    }
+    stopifnot(any(is.finite(rmse)))
+    best <- which.min(rmse)
+    list(config = candidates[[best]], prediction = predictions[[best]], tpc = tpc, step = step, RMSE = rmse[best])
+  }
+
+  # Keep TPCRegime only if RMSE improves >= 1% over the year and in >= 3 quarters
+  select_tpc <- function(kind) {
+    without <- tune(kind, get_candidates(kind, 4L, FALSE), 4L, FALSE)
+    with    <- tune(kind, get_candidates(kind, 4L, TRUE), 4L, TRUE)
+    quarter <- (as.integer(format(validation_dates, "%m")) - 1L) %/% 3L + 1L
+    quarter_gain <- vapply(1:4, function(q)
+      sqrt(mean((without$prediction[quarter == q] - validation_actual[quarter == q])^2)) -
+        sqrt(mean((with$prediction[quarter == q] - validation_actual[quarter == q])^2)), numeric(1))
+    gain <- 1 - with$RMSE / without$RMSE
+    keep <- gain >= 0.01 && sum(quarter_gain > 0) >= 3L
+    tpc_log <<- rbind(tpc_log, data.frame(Model = kind, RelativeImprovement = gain, BetterQuarters = sum(quarter_gain > 0), KeepTPC = keep))
+    if (keep) with else without
+  }
+
+  # Full models (M4)
+  selected <- list()
+  selected$ETS    <- tune("ETS", get_candidates("ETS"))
+  selected$SARIMA <- tune("SARIMA", get_candidates("SARIMA"))
+  for (kind in c("TSLM", "DynamicRegression", "XGBoost", "LSTM")) selected[[kind]] <- select_tpc(kind)
+
+  # M0-M3 are tuned separately; each keeps the TPC choice of its full model
+  incremental <- list()
+  for (kind in c("DynamicRegression", "XGBoost")) {
+    for (step in 0:4) {
+      key <- paste0(kind, "_M", step)
+      incremental[[key]] <- if (step == 4L) selected[[kind]] else
+        tune(kind, get_candidates(kind, step, selected[[kind]]$tpc), step, selected[[kind]]$tpc)
+    }
+  }
+
+  # LSTM: average of three seeds
+  seeds <- c(2026L, 2027L, 2028L)
+  selected$LSTM$prediction <- rowMeans(sapply(seeds, function(seed)
+    rolling_predict("LSTM", selected$LSTM$config, validation_dates, 4L, selected$LSTM$tpc, seed)))
+
+  # Recommendation rule, fixed before the test period
+  validation_rmse <- vapply(selected, function(x) sqrt(mean((x$prediction - validation_actual)^2)), numeric(1))
+  simplicity <- c("ETS", "SARIMA", "TSLM", "DynamicRegression", "XGBoost", "LSTM")
+  eligible <- names(validation_rmse)[validation_rmse <= min(validation_rmse) * 1.01]
+  recommended <- simplicity[simplicity %in% eligible][1]
+
+  freeze <- list(models = selected, incremental = incremental, recommended = recommended,
+                 temperature_lambda = temperature_lambda, spike_threshold = spike_threshold, mase_scale = mase_scale,
+                 refit_days = refit_days, interval_window = 180L, interval_min = 100L, seeds = seeds)
+
+  validation_predictions <- data.frame(Date = validation_dates, Actual = validation_actual)
+  validation_predictions$SeasonalNaive <- rolling_predict("SeasonalNaive", list(), validation_dates)
+  for (kind in names(selected)) validation_predictions[[kind]] <- selected[[kind]]$prediction
+
+  # checkpoint: settings are frozen before any test forecast is made
+  saveRDS(list(freeze = freeze, selected = selected, validation = validation_predictions), file.path(output_dir, "model_runs.rds"))
+}
+```
+
+# Test forecasts: January–August 2026
+
+*Runs only when `run_models = TRUE`.* The frozen settings are applied to 2026 with the same weekly re-estimation; nothing is re-tuned on test results.
+
+```{r test-forecasts}
+if (run_models) {
+  test_prediction <- data.frame(Date = test_dates, Actual = daily$DailyUSEP[match(test_dates, daily$Date)])
+  test_prediction$SeasonalNaive <- rolling_predict("SeasonalNaive", list(), test_dates)
+  for (kind in names(selected)) {
+    config <- selected[[kind]]
+    test_prediction[[kind]] <- if (kind == "LSTM") {
+      rowMeans(sapply(seeds, function(seed) rolling_predict(kind, config$config, test_dates, 4L, config$tpc, seed)))
+    } else {
+      rolling_predict(kind, config$config, test_dates, 4L, config$tpc)
+    }
+  }
+
+  # M0-M4 test forecasts (M4 = the full model already forecast above)
+  incremental_prediction <- data.frame(Date = test_dates, Actual = test_prediction$Actual)
+  for (key in names(incremental)) {
+    kind   <- sub("_M[0-4]$", "", key)
+    config <- incremental[[key]]
+    incremental_prediction[[key]] <- if (config$step == 4L) test_prediction[[kind]] else
+      rolling_predict(kind, config$config, test_dates, config$step, config$tpc)
+  }
+
+  # Forecast for 2026-09-01, the day after the data end
+  interval_models <- c("SeasonalNaive", names(selected))
+  next_prediction <- data.frame(Date = end_date + 1L, Model = interval_models, Prediction = NA_real_)
+  for (kind in interval_models) {
+    config <- selected[[kind]]
+    value <- if (kind == "SeasonalNaive") {
+      rolling_predict(kind, list(), end_date + 1L)
+    } else if (kind == "LSTM") {
+      mean(vapply(seeds, function(seed) rolling_predict(kind, config$config, end_date + 1L, 4L, config$tpc, seed), numeric(1)))
+    } else {
+      rolling_predict(kind, config$config, end_date + 1L, 4L, config$tpc)
+    }
+    next_prediction$Prediction[next_prediction$Model == kind] <- value
+  }
+
+  saveRDS(list(freeze = freeze, selected = selected, validation = validation_predictions, test = test_prediction),
+          file.path(output_dir, "model_runs.rds"))
+  write_xlsx(list(Validation = validation_predictions, Test = test_prediction, Incremental = incremental_prediction,
+                  NextDay = next_prediction, ValidationLog = validation_log, TPC = tpc_log),
+             file.path(output_dir, "model_forecasts.xlsx"))
+}
+```
+
+## Load the saved model run
+
+With `run_models = FALSE` the forecasts of the full run are read back here; everything below uses the same objects in both modes.
+
+```{r load-models}
+if (!run_models) {
+  runs <- readRDS(file.path(output_dir, "model_runs.rds"))
+  freeze   <- runs$freeze
+  selected <- runs$selected
+  validation_predictions <- runs$validation
+  test_prediction        <- runs$test
+  read_sheet <- function(sheet) {
+    x <- as.data.frame(read_excel(file.path(output_dir, "model_forecasts.xlsx"), sheet = sheet))
+    if ("Date" %in% names(x)) x$Date <- as.Date(x$Date)
+    x
+  }
+  incremental_prediction <- read_sheet("Incremental")
+  next_prediction        <- read_sheet("NextDay")
+  validation_log         <- read_sheet("ValidationLog")
+  tpc_log                <- read_sheet("TPC")
+}
+incremental <- freeze$incremental
+recommended <- freeze$recommended
+
+# Frozen settings of the six models
+setting_text <- function(cfg) if (length(cfg) == 0) "OLS" else
+  paste(names(cfg), vapply(cfg, function(v) paste(v, collapse = ","), character(1)), sep = " = ", collapse = "; ")
+frozen_table <- data.frame(Model = names(selected),
+                           Setting = vapply(selected, function(s) setting_text(s$config), character(1)),
+                           TPC = vapply(selected, function(s) s$tpc, logical(1)))
+kable(frozen_table, row.names = FALSE, caption = "Frozen settings chosen on the 2025 validation period")
+```
+
+# Model evaluation
+
+The yesterday's-price benchmark (Naive) is added to the validation and test forecasts, so every comparison includes two benchmarks: Naive and SeasonalNaive.
+
+```{r evaluation-data}
+yesterday <- function(dates) daily$DailyUSEP[match(dates - 1L, daily$Date)]
+val  <- validation_predictions
+test <- test_prediction
+val$Naive  <- yesterday(val$Date)
+test$Naive <- yesterday(test$Date)
+eval_models <- c("Naive", "SeasonalNaive", "ETS", "SARIMA", "TSLM", "DynamicRegression", "XGBoost", "LSTM")
+rmse <- function(df, m) sqrt(mean((df$Actual - df[[m]])^2))
+```
+
+## Forecast accuracy
+
+```{r accuracy}
+accuracy_table <- bind_rows(lapply(eval_models, function(m)
+  cbind(Model = m, Val_RMSE = rmse(val, m), score(test$Actual, test[[m]]))))
+base_mae  <- function(m) accuracy_table$MAE[accuracy_table$Model == m]
+base_rmse <- function(m) accuracy_table$RMSE[accuracy_table$Model == m]
+accuracy_table <- accuracy_table |>
+  mutate(MAE_vs_SNaive = MAE / base_mae("SeasonalNaive"),
+         MAE_vs_Naive  = MAE / base_mae("Naive"),
+         RMSE_gain_vs_SNaive = 1 - RMSE / base_rmse("SeasonalNaive"),
+         RMSE_gain_vs_Naive  = 1 - RMSE / base_rmse("Naive")) |>
+  arrange(RMSE)
+kable(accuracy_table, digits = 3, row.names = FALSE,
+      caption = "Table 7. Validation RMSE and test-period accuracy (RMSE, MAE, MASE, sMAPE are test values), sorted by test RMSE")
+```
+
+```{r fig3, fig.height = 7.5}
+model_colours <- c(Naive = "#7F7F7F", SARIMA = "#F8766D", ETS = "#7CAE00", TSLM = "#E76BF3",
+                   DynamicRegression = "#619CFF", XGBoost = "#00BFC4", LSTM = "#C77CFF")
+# The four best models by test RMSE, benchmarks excluded
+top4 <- head(setdiff(accuracy_table$Model, c("Naive", "SeasonalNaive")), 4)
+p3 <- test |>
+  select(Date, Actual, all_of(top4)) |>
+  pivot_longer(all_of(top4), names_to = "Model", values_to = "Forecast") |>
+  mutate(Model = factor(Model, levels = top4)) |>
+  ggplot(aes(x = Date)) +
+  geom_line(aes(y = Actual, colour = "Actual")) +
+  geom_line(aes(y = Forecast, colour = Model)) +
+  facet_grid(vars(Model)) +
+  scale_colour_manual(values = c(Actual = "black", model_colours[top4]), breaks = c("Actual", top4)) +
+  labs(title = "Test-period forecasts of the four best models", y = "USEP (SGD/MWh)", colour = "series")
+save_fig(p3, "fig3_top4.png", 8, 7.5)
+```
+
+```{r fig4, fig.height = 3}
+bar_models <- c("Naive", top4)
+p4 <- tibble(Model  = factor(rep(bar_models, 2), levels = bar_models),
+             Sample = factor(rep(c("Validation 2025", "Test 2026"), each = length(bar_models)),
+                             levels = c("Validation 2025", "Test 2026")),
+             RMSE   = c(sapply(bar_models, rmse, df = val), sapply(bar_models, rmse, df = test))) |>
+  ggplot(aes(x = Model, y = RMSE, fill = Model)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.2f", RMSE)), hjust = -0.2, size = 3) +
+  coord_flip() +
+  facet_wrap(vars(Sample)) +
+  ylim(0, 70) +
+  scale_fill_manual(values = model_colours[bar_models]) +
+  theme(legend.position = "none") +
+  labs(title = "RMSE of the four best models and the naive benchmark", x = NULL, y = "RMSE (SGD/MWh)")
+save_fig(p4, "fig4_rmse.png", 8, 3)
+```
+
+## Residual diagnostics
+
+**In-sample (traditional models).** The frozen ETS, SARIMA, TSLM and dynamic-regression specifications are fitted to the training period, as at the first validation re-estimation. `checkresiduals()` gives Ljung-Box tests (Breusch-Godfrey for TSLM) at 14 lags.
+
+```{r insample-residuals, fig.height = 4.5}
+train_dat <- initial_data[initial_data$Date >= warmup_date, ]
+fill_median <- function(x) {
+  for (j in seq_len(ncol(x))) x[is.na(x[, j]), j] <- median(x[, j], na.rm = TRUE)
+  x
+}
+
+cfg <- selected$ETS$config
+fit_ets <- ets(train_ts, model = cfg$model, damped = cfg$damped)
+cfg <- selected$SARIMA$config
+fit_sarima <- Arima(train_ts, order = cfg$order, seasonal = cfg$seasonal, include.constant = cfg$constant)
+
+y_feat <- ts(train_dat$DailyUSEP, frequency = 7)  # feature models start after the 28-day warm-up
+x_tslm <- fill_median(as.matrix(train_dat[feature_names("TSLM", 4L, selected$TSLM$tpc)]))
+fit_tslm <- tslm(y_feat ~ x_tslm)
+
+cfg <- selected$DynamicRegression$config
+x_dr <- fill_median(as.matrix(train_dat[feature_names("DynamicRegression", 4L, selected$DynamicRegression$tpc)]))
+fit_dr <- Arima(y_feat, xreg = x_dr, order = cfg$order, seasonal = cfg$seasonal, include.constant = cfg$constant)
+
+insample_test <- function(fit, model) {
+  out <- checkresiduals(fit)  # residual plots + test
+  if (!inherits(out, "htest")) return(NULL)
+  data.frame(Model = model, Test = out$method, Statistic = unname(out$statistic), p = out$p.value)
+}
+insample_tests <- bind_rows(insample_test(fit_ets, "ETS"), insample_test(fit_sarima, "SARIMA"),
+                            insample_test(fit_tslm, "TSLM"), insample_test(fit_dr, "DynamicRegression"))
+if (nrow(insample_tests) == 0) insample_tests <- data.frame(Note = "See the printed checkresiduals() output above")
+kable(insample_tests, digits = 3, row.names = FALSE, caption = "In-sample residual tests, training period")
+```
+
+**Out-of-sample (all models).** One-step forecast errors (actual − forecast; positive = under-prediction): Ljung-Box at 14 lags for each period, and ADF/KPSS on the 608 pooled 2025–2026 errors to check whether the error mean drifts.
+
+```{r error-diagnostics}
+error_diagnostics <- bind_rows(lapply(eval_models, function(m) {
+  e_val  <- val$Actual - val[[m]]
+  e_test <- test$Actual - test[[m]]
+  e_all  <- c(e_val, e_test)
+  kp <- kpss.test(e_all)
+  data.frame(Model = m,
+             LB_val_p  = Box.test(e_val,  lag = 14, type = "Ljung-Box")$p.value,
+             LB_test_p = Box.test(e_test, lag = 14, type = "Ljung-Box")$p.value,
+             KPSS = unname(kp$statistic), KPSS_p = kp$p.value, ADF_p = adf.test(e_all)$p.value,
+             MeanError_2025 = mean(e_val), MeanError_2026 = mean(e_test))
+}))
+kable(error_diagnostics, digits = 3, row.names = FALSE, caption = "Table 8. Diagnostics of one-step forecast errors")
+```
+
+## Diebold-Mariano tests
+
+`dm.test()` (with the Harvey-Leybourne-Newbold correction) compares two error series. `power = 2` compares squared errors (the RMSE criterion), `power = 1` absolute errors (the MAE criterion). A negative statistic means the first model has the smaller loss. Validation was used for tuning, so the test period carries the conclusions.
+
+```{r dm-tests}
+dm <- function(df, a, b, power = 2) {
+  d <- dm.test(df$Actual - df[[a]], df$Actual - df[[b]], h = 1, power = power)
+  c(DM = unname(d$statistic), p = unname(d$p.value))
+}
+dm_table <- function(pairs) {
+  out <- t(sapply(pairs, function(p) c(val_sq  = dm(val,  p[1], p[2], 2), val_abs  = dm(val,  p[1], p[2], 1),
+                                       test_sq = dm(test, p[1], p[2], 2), test_abs = dm(test, p[1], p[2], 1))))
+  rownames(out) <- sapply(pairs, paste, collapse = " vs ")
+  out
+}
+as_table <- function(m) data.frame(Comparison = rownames(m), m, row.names = NULL, check.names = FALSE)
+
+# Table 9: every model against yesterday's price
+dm9 <- dm_table(lapply(setdiff(eval_models, "Naive"), function(m) c(m, "Naive")))
+kable(as_table(dm9), digits = 3, caption = "Table 9. DM tests against the naive benchmark")
+
+# Table 10: pairwise tests among the three best models by test RMSE
+top3 <- head(top4, 3)
+dm10 <- dm_table(combn(top3, 2, simplify = FALSE))
+kable(as_table(dm10), digits = 3, caption = "Table 10. Pairwise DM tests among the three best models by test RMSE")
+
+# Holm adjustment over the 40 p-values of Tables 9 and 10 (rows stacked, then adjusted together)
+p_cols <- c("val_sq.p", "val_abs.p", "test_sq.p", "test_abs.p")
+p_raw  <- rbind(dm9[, p_cols], dm10[, p_cols])
+p_holm <- matrix(p.adjust(p_raw, method = "holm"), nrow = nrow(p_raw), dimnames = dimnames(p_raw))
+kable(as_table(p_holm), digits = 3, caption = "Holm-adjusted p-values for Tables 9 and 10")
+
+# Table 11: price-history models against regressions with external variables
+dm11 <- dm_table(list(c("SARIMA", "TSLM"), c("SARIMA", "DynamicRegression"), c("ETS", "TSLM"), c("ETS", "DynamicRegression")))
+kable(as_table(dm11), digits = 3, caption = "Table 11. DM tests: price history only vs external regressors")
+```
+
+## Do external variables help? (M0–M4)
+
+```{r incremental}
+incremental_scores <- bind_rows(lapply(names(incremental), function(key)
+  cbind(Model = sub("_M[0-4]$", "", key), Step = incremental[[key]]$step,
+        score(incremental_prediction$Actual, incremental_prediction[[key]])))) |>
+  group_by(Model) |>
+  arrange(Step, .by_group = TRUE) |>
+  mutate(MarginalRMSEImprovement = 1 - RMSE / lag(RMSE), CumulativeRMSEImprovement = 1 - RMSE / first(RMSE)) |>
+  ungroup()
+kable(incremental_scores, digits = 3, caption = "Table 12. Test-period accuracy as external variables are added")
+```
+
+Why the reserve and regulation prices (step M2) hurt the dynamic regression: the primary-reserve price shifts far above its training range in 2026, and the contingency-reserve and regulation prices are highly correlated.
+
+```{r ancillary-check}
+train_rows <- daily$Sample == "Train"
+test_rows  <- daily$Sample == "Test"
+data.frame(Sample = c("Train", "Test"),
+           Mean     = c(mean(daily$PrimaryReserve[train_rows]), mean(daily$PrimaryReserve[test_rows])),
+           Median   = c(median(daily$PrimaryReserve[train_rows]), median(daily$PrimaryReserve[test_rows])),
+           Skewness = c(skew(daily$PrimaryReserve[train_rows]), skew(daily$PrimaryReserve[test_rows]))) |>
+  kable(digits = 2, caption = "Primary reserve price (SGD/MWh), training vs test")
+
+# Correlations in the training period
+round(c(Contingency_vs_Regulation = cor(daily$ContingencyReserve[train_rows], daily$Regulation[train_rows]),
+        USEP_vs_Contingency_lag1 = cor(initial_data$DailyUSEP, initial_data$ContingencyReserve_lag1, use = "complete.obs"),
+        USEP_vs_Regulation_lag1  = cor(initial_data$DailyUSEP, initial_data$Regulation_lag1, use = "complete.obs"),
+        USEP_vs_Primary_lag1     = cor(initial_data$DailyUSEP, initial_data$PrimaryReserve_lag1, use = "complete.obs")), 3)
+
+# DM test, test period: does adding the M2 block make each model worse than M1?
+rbind(DynamicRegression = c(sq = dm(incremental_prediction, "DynamicRegression_M2", "DynamicRegression_M1", 2),
+                            abs = dm(incremental_prediction, "DynamicRegression_M2", "DynamicRegression_M1", 1)),
+      XGBoost = c(sq = dm(incremental_prediction, "XGBoost_M2", "XGBoost_M1", 2),
+                  abs = dm(incremental_prediction, "XGBoost_M2", "XGBoost_M1", 1))) |>
+  round(3)
+```
+
+## Ancillary-price robustness
+
+Two fixes for the M2 block are tried together: the primary-reserve price enters as log(1 + x) or is dropped, and only one of the two highly correlated contingency-reserve and regulation prices is kept. The four combinations are one more tuning choice: for each model and step M2–M4, the combination and the hyperparameters with the lowest 2025 validation RMSE are frozen and then forecast on 2026, as for M0–M4. *The forecasts are made only when `run_models = TRUE` and saved to `output/ancillary_robustness.rds`; otherwise that file is read back.*
+
+```{r ancillary-robustness}
+ancillary_specs <- c("log_cont", "log_reg", "drop_cont", "drop_reg")
+robust_file <- file.path(output_dir, "ancillary_robustness.rds")
+if (run_models) {
+  robust_runs <- list()
+  for (kind in c("DynamicRegression", "XGBoost")) {
+    tpc <- incremental[[paste0(kind, "_M4")]]$tpc  # same TPC choice as the M0-M4 runs
+    for (step in 2:4) {
+      for (spec in ancillary_specs) {
+        message(paste("Ancillary robustness", kind, "M", step, spec))
+        candidates <- get_candidates(kind, step, tpc, spec)
+        val_rmse <- vapply(candidates, function(cfg) tryCatch({
+          p <- rolling_predict(kind, cfg, validation_dates, step, tpc, ancillary = spec)
+          sqrt(mean((p - val$Actual)^2))
+        }, error = function(e) Inf), numeric(1))
+        stopifnot(any(is.finite(val_rmse)))
+        config <- candidates[[which.min(val_rmse)]]
+        robust_runs[[length(robust_runs) + 1L]] <- list(Model = kind, Step = step, Spec = spec, config = config, Val_RMSE = min(val_rmse),
+                                                       test = rolling_predict(kind, config, test_dates, step, tpc, ancillary = spec))
+      }
+    }
+  }
+  saveRDS(robust_runs, robust_file)
+}
+robust_runs <- readRDS(robust_file)
+
+# Validation and test RMSE of every variant; the original rows are the M2-M4 runs above
+robust_prediction <- data.frame(Date = test_dates, Actual = test$Actual)
+for (r in robust_runs) robust_prediction[[paste0(r$Model, "_M", r$Step, "_", r$Spec)]] <- r$test
+original_rows <- bind_rows(lapply(c("DynamicRegression", "XGBoost"), function(kind) bind_rows(lapply(2:4, function(step) {
+  key <- paste0(kind, "_M", step)
+  data.frame(Model = kind, Step = step, Spec = "original", Val_RMSE = incremental[[key]]$RMSE,
+             Test_RMSE = rmse(incremental_prediction, key))
+}))))
+variant_rows <- bind_rows(lapply(robust_runs, function(r)
+  data.frame(Model = r$Model, Step = r$Step, Spec = r$Spec, Val_RMSE = r$Val_RMSE, Test_RMSE = sqrt(mean((r$test - test$Actual)^2)))))
+ancillary_table <- bind_rows(original_rows, variant_rows) |>
+  group_by(Model, Step) |>
+  mutate(Selected = Spec != "original" & Val_RMSE == min(Val_RMSE[Spec != "original"])) |>
+  ungroup() |>
+  arrange(Model, Step)
+kable(ancillary_table, digits = 2,
+      caption = "Ancillary-price variants at M2-M4 (Selected = lowest validation RMSE among the four variants)")
+
+# Selected variant against the original specification, test period (negative DM: the variant has the smaller loss)
+selected_variants <- filter(ancillary_table, Selected)
+ancillary_dm <- bind_rows(lapply(seq_len(nrow(selected_variants)), function(i) {
+  s <- selected_variants[i, ]
+  original <- paste0(s$Model, "_M", s$Step)
+  df <- data.frame(Actual = test$Actual, Variant = robust_prediction[[paste0(original, "_", s$Spec)]],
+                   Original = incremental_prediction[[original]])
+  sq  <- dm(df, "Variant", "Original", 2)
+  ab  <- dm(df, "Variant", "Original", 1)
+  data.frame(Model = s$Model, Step = s$Step, Spec = s$Spec, Val_RMSE_original = incremental[[original]]$RMSE,
+             Val_RMSE_variant = s$Val_RMSE, Test_RMSE_original = rmse(df, "Original"),
+             Test_RMSE_variant = rmse(df, "Variant"), Improvement = 1 - rmse(df, "Variant") / rmse(df, "Original"),
+             DM_sq = sq[["DM"]], p_sq = sq[["p"]], DM_abs = ab[["DM"]], p_abs = ab[["p"]])
+}))
+# Holm correction over the six comparisons, separately for each loss
+ancillary_dm$p_sq_holm  <- p.adjust(ancillary_dm$p_sq, "holm")
+ancillary_dm$p_abs_holm <- p.adjust(ancillary_dm$p_abs, "holm")
+kable(ancillary_dm, digits = 3, caption = "Selected ancillary variant vs the original specification, test period")
+```
+
+## Prediction intervals
+
+Empirical intervals around each point forecast: the radius is the finite-sample quantile, rank ⌈(n + 1)(1 − α)⌉, of the latest (at most 180, at least 100) realised absolute errors. They start from the 2025 validation errors, and each test error is added only after its day is realised.
+
+```{r intervals}
+interval_models <- c("SeasonalNaive", names(selected))
+interval_rows <- list()
+for (kind in interval_models) {
+  past_errors <- abs(val[[kind]] - val$Actual)
+  for (i in seq_len(nrow(test))) {
+    calibration <- tail(past_errors, 180L)
+    stopifnot(length(calibration) >= 100L)
+    for (alpha in c(0.20, 0.05)) {
+      rank   <- min(length(calibration), ceiling((length(calibration) + 1L) * (1 - alpha)))
+      radius <- sort(calibration)[rank]
+      interval_rows[[length(interval_rows) + 1L]] <- data.frame(
+        Date = test$Date[i], Model = kind, Level = 1 - alpha, Actual = test$Actual[i], Prediction = test[[kind]][i],
+        Lower = test[[kind]][i] - radius, Upper = test[[kind]][i] + radius)
+    }
+    past_errors <- c(past_errors, abs(test[[kind]][i] - test$Actual[i]))  # today's error becomes usable tomorrow
+  }
+}
+intervals <- bind_rows(interval_rows)
+intervals$Covered <- intervals$Actual >= intervals$Lower & intervals$Actual <= intervals$Upper
+intervals$Width   <- intervals$Upper - intervals$Lower
+# Interval score: width + penalty 2/alpha times the distance by which the actual falls outside
+intervals$IntervalScore <- intervals$Width +
+  2 / (1 - intervals$Level) * pmax(intervals$Lower - intervals$Actual, 0) +
+  2 / (1 - intervals$Level) * pmax(intervals$Actual - intervals$Upper, 0)
+interval_summary <- intervals |>
+  group_by(Model, Level) |>
+  summarise(N = n(), Coverage = mean(Covered), MeanWidth = mean(Width), MeanIntervalScore = mean(IntervalScore), .groups = "drop")
+kable(interval_summary, digits = 3, caption = "Table 13. Empirical prediction intervals, test period")
+```
+
+```{r fig5, fig.height = 5.5}
+p5 <- intervals |>
+  filter(Model %in% c("XGBoost", "LSTM")) |>
+  select(Date, Model, Level, Actual, Prediction, Lower, Upper) |>
+  pivot_wider(names_from = Level, values_from = c(Lower, Upper)) |>
+  mutate(Model = factor(Model, levels = c("XGBoost", "LSTM"))) |>
+  ggplot(aes(x = Date)) +
+  geom_ribbon(aes(ymin = Lower_0.95, ymax = Upper_0.95, fill = "95%")) +
+  geom_ribbon(aes(ymin = Lower_0.8, ymax = Upper_0.8, fill = "80%")) +
+  geom_line(aes(y = Actual, colour = "Actual")) +
+  geom_line(aes(y = Prediction, colour = "Forecast")) +
+  facet_grid(vars(Model)) +
+  scale_fill_manual(values = c("80%" = "#596DD5", "95%" = "#D5DBFF")) +
+  scale_colour_manual(values = c(Actual = "black", Forecast = "#0000AA")) +
+  labs(title = "XGBoost and LSTM one-day-ahead forecasts with empirical prediction intervals",
+       y = "USEP (SGD/MWh)", fill = "level", colour = "series")
+save_fig(p5, "fig5_intervals.png", 8, 5.5)
+```
+
+## TPC variable and spike days
+
+```{r tpc-spike}
+kable(tpc_log, digits = 4, caption = "Table 14. TPC retention rule on the 2025 validation period")
+
+# Normal days vs spike days (actual above the training 95th percentile)
+spike <- test$Actual > spike_threshold
+day_groups <- list(Normal = !spike, Spike = spike)
+spike_table <- bind_rows(lapply(eval_models, function(m) bind_rows(lapply(names(day_groups), function(g) {
+  keep <- day_groups[[g]]
+  if (!any(keep)) return(NULL)
+  cbind(Model = m, Group = g, score(test$Actual[keep], test[[m]][keep]),
+        Underprediction = mean(test[[m]][keep] < test$Actual[keep]),
+        MeanShortfall   = mean(pmax(test$Actual[keep] - test[[m]][keep], 0)))
+}))))
+kable(spike_table, digits = 2, row.names = FALSE, caption = "Table C1. Test-period accuracy on normal and spike days")
+```
+
+## Recommendation
+
+```{r recommendation}
+validation_rmse <- sapply(names(selected), function(m) rmse(val, m))
+eligible <- names(validation_rmse)[validation_rmse <= min(validation_rmse) * 1.01]
+simplicity <- c("ETS", "SARIMA", "TSLM", "DynamicRegression", "XGBoost", "LSTM")
+round(sort(validation_rmse), 2)
+c(Recommended = recommended, RuleCheck = simplicity[simplicity %in% eligible][1])
+
+```
+
+## Why the validation and test rankings differ
+
+The recommendation follows the validation rule, but the test-period ranking is different. Three checks: the two periods have very different price levels; on the highest-price test days every model under-predicts; and the test-best model's advantage over the recommended model is not driven by a few days only. Table 12 adds a fourth: XGBoost's external variables help on validation but not on test.
+
+```{r ranking-shift}
+# Price level and volatility in the two evaluation periods
+regime <- data.frame(Sample = c("Validation 2025", "Test 2026"), N = c(nrow(val), nrow(test)),
+                     Mean = c(mean(val$Actual), mean(test$Actual)), SD = c(sd(val$Actual), sd(test$Actual)))
+kable(regime, digits = 1, caption = "Daily USEP in the validation and test periods (SGD/MWh)")
+
+# Mean error (actual - forecast; positive = under-prediction); high-price days = top 10% of test actuals
+high <- test$Actual > quantile(test$Actual, 0.9)
+bias_table <- bind_rows(lapply(top3, function(m)
+  data.frame(Model = m, MeanError_val = mean(val$Actual - val[[m]]), MeanError_test = mean(test$Actual - test[[m]]),
+             MeanError_test_high = mean((test$Actual - test[[m]])[high]))))
+kable(bias_table, digits = 2, caption = "Mean forecast error of the three best models by test RMSE")
+
+# How concentrated is the test-best model's advantage over the recommended model?
+test_best <- top4[1]
+d <- (test$Actual - test[[recommended]])^2 - (test$Actual - test[[test_best]])^2  # > 0: test-best model better that day
+top10 <- order(abs(d), decreasing = TRUE)[1:10]
+concentration <- data.frame(Comparison = paste(test_best, "vs", recommended),
+                            ShareFromTop10Days = sum(d[top10]) / sum(d),
+                            RMSE_TestBest_excl_top10 = sqrt(mean((test$Actual - test[[test_best]])[-top10]^2)),
+                            RMSE_Recommended_excl_top10 = sqrt(mean((test$Actual - test[[recommended]])[-top10]^2)),
+                            TestDaysNeededFor5pctDM = (qnorm(0.975) * sd(d) / mean(d))^2)
+kable(concentration, digits = 2, caption = "Concentration of the test-best model's advantage")
+```
+
+# Next-day forecast: 1 September 2026
+
+Forecasts for the first day after the data end, made with the frozen settings. The realised value (mean of the 48 periods in `USEP.xlsx`) is shown only for comparison.
+
+```{r next-day}
+next_day <- next_prediction
+next_day$Actual <- usep$DailyUSEP[usep$Date == end_date + 1L]
+next_day$Error  <- next_day$Actual - next_day$Prediction
+next_day <- next_day[order(-next_day$Prediction), ]
+kable(next_day, digits = 2, row.names = FALSE, caption = "Table 15. One-day-ahead forecasts for 2026-09-01 (SGD/MWh)")
+```
+
+# Export
+
+```{r export}
+# Feature tables actually used for each test week (one preprocessing cut-off per re-estimation)
+collect_test_features <- function(i) {
+  cutoff <- test_dates[i] - 1L
+  dat <- prepare_features(cutoff, min(end_date, cutoff + refit_days))
+  dat <- dat[dat$Date > cutoff, ]
+  dat$PreprocessingCutoff <- cutoff
+  dat
+}
+processed_test <- bind_rows(lapply(seq(1L, length(test_dates), by = refit_days), collect_test_features))
+
+write_xlsx(list(Daily = usep_sample, Train_Features = initial_data, Test_Features = processed_test,
+                Temperature_CV = temperature_cv, Holiday_Dates = data.frame(Date = holiday_dates)),
+           file.path(output_dir, "processed_data.xlsx"))
+
+write_xlsx(list(Descriptive = annual, Stationarity = stationarity, Frozen_Settings = frozen_table,
+                Accuracy = accuracy_table, Residuals_InSample = insample_tests, Residuals_Errors = error_diagnostics,
+                DM_vs_Naive = as_table(dm9), DM_Top3 = as_table(dm10), DM_Holm = as_table(p_holm),
+                Regime = regime, Bias_Top3 = bias_table, Concentration = concentration,
+                DM_External = as_table(dm11), Incremental = incremental_scores,
+                Ancillary_Variants = ancillary_table, Ancillary_DM = ancillary_dm, Intervals = interval_summary,
+                TPC = tpc_log, Spike_Normal = spike_table, NextDay = next_day, Intervals_Daily = intervals),
+           file.path(output_dir, "report_tables.xlsx"))
+```
+
+# Appendix: temperature reconstruction
+
+```{r appendix-temperature}
+longest_gap <- function(x) {
+  r <- rle(is.na(x))
+  max(c(0L, r$lengths[r$values]))
+}
+temp_gaps <- data.frame(Station     = stations,
+                        MissingDays = colSums(is.na(usep_sample[stations])),
+                        LongestGap  = vapply(usep_sample[stations], longest_gap, numeric(1)),
+                        Lambda      = c(NA, temperature_lambda[stations[-1]]))
+kable(temp_gaps, row.names = FALSE, caption = "Missing station-days, 2021-01-01 to 2026-08-31")
+c(DaysWithoutRawFiveStationMean = sum(is.na(usep_sample$TempSG_raw)))
+
+# Reconstruction error at the chosen lambda (N counts masked evaluations, not distinct days)
+kable(temperature_cv[temperature_cv$Lambda == temperature_lambda[temperature_cv$Station], ], digits = 3,
+      row.names = FALSE, caption = "Table B1. Station reconstruction error at the chosen lambda")
+```
+
+```{r session-info}
+sessionInfo()
+```
